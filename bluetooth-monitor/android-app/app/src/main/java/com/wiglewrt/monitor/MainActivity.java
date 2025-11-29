@@ -1,6 +1,10 @@
 package com.wiglewrt.monitor;
 
 import android.Manifest;
+import android.animation.ArgbEvaluator;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
+import android.app.Activity;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -16,31 +20,24 @@ import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.Context;
 import android.content.pm.PackageManager;
-import android.os.Build;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelUuid;
 import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.View;
+import android.view.animation.AlphaAnimation;
+import android.view.animation.Animation;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.cardview.widget.CardView;
-import androidx.core.content.ContextCompat;
-import androidx.recyclerview.widget.LinearLayoutManager;
-import androidx.recyclerview.widget.RecyclerView;
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
-
-import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -48,177 +45,127 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends Activity {
     private static final String TAG = "WigleWRTMonitor";
+    private static final int PERMISSION_REQUEST_CODE = 1;
 
     // WigleWRT BLE Service UUIDs
     private static final UUID WIGLEWRT_SERVICE_UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef0");
     private static final UUID STATUS_CHAR_UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef1");
     private static final UUID GPS_CHAR_UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef2");
-    private static final UUID NETWORKS_CHAR_UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef3");
     private static final UUID SESSION_CHAR_UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef4");
     private static final UUID RADIOS_CHAR_UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef5");
     private static final UUID ACTIVITY_CHAR_UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef6");
 
-    private static final long SCAN_PERIOD = 15000; // 15 seconds
-    private static final long REFRESH_INTERVAL = 5000; // 5 seconds
+    private static final long SCAN_PERIOD = 15000;
+    private static final long REFRESH_INTERVAL = 3000;
+
+    // Colors
+    private static final int COLOR_CONNECTED = Color.parseColor("#10B981");
+    private static final int COLOR_CONNECTING = Color.parseColor("#F59E0B");
+    private static final int COLOR_DISCONNECTED = Color.parseColor("#EF4444");
+    private static final int COLOR_TEXT_PRIMARY = Color.parseColor("#F0F6FC");
+    private static final int COLOR_TEXT_SECONDARY = Color.parseColor("#8B949E");
+    private static final int COLOR_TEXT_MUTED = Color.parseColor("#6E7681");
+    private static final int COLOR_SIGNAL_EXCELLENT = Color.parseColor("#10B981");
+    private static final int COLOR_SIGNAL_GOOD = Color.parseColor("#22C55E");
+    private static final int COLOR_SIGNAL_FAIR = Color.parseColor("#F59E0B");
+    private static final int COLOR_SIGNAL_WEAK = Color.parseColor("#EF4444");
+    private static final int COLOR_NETWORK_NEW = Color.parseColor("#8B5CF6");
 
     // UI Elements
+    private View statusDot;
+    private View liveDot;
     private TextView tvConnectionStatus;
-    private TextView tvScannerStatus;
-    private TextView tvGpsStatus;
-    private TextView tvSessionId;
-    private TextView tvTotalNetworks;
-    private TextView tvSessionStart;
-    private TextView tvNewNetworks;
-    private LinearLayout layoutRadios;
-    private RecyclerView rvActivity;
     private Button btnConnect;
-    private Button btnRefresh;
-    private ProgressBar progressBar;
-    private SwipeRefreshLayout swipeRefresh;
-    private CardView cardStatus;
-    private CardView cardGps;
-    private CardView cardSession;
-    private CardView cardRadios;
-    private CardView cardActivity;
+    private TextView tvTotalNetworks;
+    private TextView tvNewNetworks;
+    private TextView tvScannerStatus;
+    private TextView tvSessionId;
+    private TextView tvDuration;
+    private TextView tvGpsStatus;
+    private TextView tvLatitude;
+    private TextView tvLongitude;
+    private TextView tvSatellites;
+    private TextView tvFeedCount;
+    private LinearLayout emptyState;
+    private LinearLayout networkList;
 
     // BLE
     private BluetoothAdapter bluetoothAdapter;
     private BluetoothLeScanner bleScanner;
     private BluetoothGatt bluetoothGatt;
-    private boolean isScanning = false;
-    private boolean isConnected = false;
     private BluetoothGattService wiglewrtService;
 
-    private Handler handler;
-    private Gson gson;
-    private ActivityAdapter activityAdapter;
+    private boolean isScanning = false;
+    private boolean isConnected = false;
+    private Handler handler = new Handler(Looper.getMainLooper());
 
-    private final Handler refreshHandler = new Handler(Looper.getMainLooper());
+    // Data storage
+    private int totalNetworks = 0;
+    private int newNetworks = 0;
+    private String sessionStartTime = null;
+    private List<NetworkEntry> recentNetworks = new ArrayList<>();
+
+    // Animations
+    private ObjectAnimator pulseAnimator;
+
     private final Runnable refreshRunnable = new Runnable() {
         @Override
         public void run() {
             if (isConnected) {
                 readAllCharacteristics();
-                refreshHandler.postDelayed(this, REFRESH_INTERVAL);
+                handler.postDelayed(this, REFRESH_INTERVAL);
             }
         }
     };
-
-    private final ActivityResultLauncher<String[]> permissionLauncher =
-            registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> {
-                boolean allGranted = true;
-                for (Boolean granted : result.values()) {
-                    if (!granted) {
-                        allGranted = false;
-                        break;
-                    }
-                }
-                if (allGranted) {
-                    initBluetooth();
-                } else {
-                    Toast.makeText(this, "Bluetooth permissions required", Toast.LENGTH_LONG).show();
-                }
-            });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        handler = new Handler(Looper.getMainLooper());
-        gson = new Gson();
-
         initViews();
-        checkPermissions();
+        initBluetooth();
+        setupAnimations();
     }
 
     private void initViews() {
+        statusDot = findViewById(R.id.statusDot);
+        liveDot = findViewById(R.id.liveDot);
         tvConnectionStatus = findViewById(R.id.tvConnectionStatus);
-        tvScannerStatus = findViewById(R.id.tvScannerStatus);
-        tvGpsStatus = findViewById(R.id.tvGpsStatus);
-        tvSessionId = findViewById(R.id.tvSessionId);
-        tvTotalNetworks = findViewById(R.id.tvTotalNetworks);
-        tvSessionStart = findViewById(R.id.tvSessionStart);
-        tvNewNetworks = findViewById(R.id.tvNewNetworks);
-        layoutRadios = findViewById(R.id.layoutRadios);
-        rvActivity = findViewById(R.id.rvActivity);
         btnConnect = findViewById(R.id.btnConnect);
-        btnRefresh = findViewById(R.id.btnRefresh);
-        progressBar = findViewById(R.id.progressBar);
-        swipeRefresh = findViewById(R.id.swipeRefresh);
-        cardStatus = findViewById(R.id.cardStatus);
-        cardGps = findViewById(R.id.cardGps);
-        cardSession = findViewById(R.id.cardSession);
-        cardRadios = findViewById(R.id.cardRadios);
-        cardActivity = findViewById(R.id.cardActivity);
+        tvTotalNetworks = findViewById(R.id.tvTotalNetworks);
+        tvNewNetworks = findViewById(R.id.tvNewNetworks);
+        tvScannerStatus = findViewById(R.id.tvScannerStatus);
+        tvSessionId = findViewById(R.id.tvSessionId);
+        tvDuration = findViewById(R.id.tvDuration);
+        tvGpsStatus = findViewById(R.id.tvGpsStatus);
+        tvLatitude = findViewById(R.id.tvLatitude);
+        tvLongitude = findViewById(R.id.tvLongitude);
+        tvSatellites = findViewById(R.id.tvSatellites);
+        tvFeedCount = findViewById(R.id.tvFeedCount);
+        emptyState = findViewById(R.id.emptyState);
+        networkList = findViewById(R.id.networkList);
 
-        // Setup RecyclerView
-        activityAdapter = new ActivityAdapter();
-        rvActivity.setLayoutManager(new LinearLayoutManager(this));
-        rvActivity.setAdapter(activityAdapter);
-
-        // Button listeners
-        btnConnect.setOnClickListener(v -> {
-            if (isConnected) {
-                disconnect();
-            } else {
-                startScan();
+        btnConnect.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (isConnected) {
+                    disconnect();
+                } else {
+                    checkPermissionsAndScan();
+                }
             }
         });
-
-        btnRefresh.setOnClickListener(v -> {
-            if (isConnected) {
-                readAllCharacteristics();
-            }
-        });
-
-        swipeRefresh.setOnRefreshListener(() -> {
-            if (isConnected) {
-                readAllCharacteristics();
-            }
-            swipeRefresh.setRefreshing(false);
-        });
-
-        // Initially hide data cards
-        setCardsVisible(false);
     }
 
-    private void setCardsVisible(boolean visible) {
-        int visibility = visible ? View.VISIBLE : View.GONE;
-        cardStatus.setVisibility(visibility);
-        cardGps.setVisibility(visibility);
-        cardSession.setVisibility(visibility);
-        cardRadios.setVisibility(visibility);
-        cardActivity.setVisibility(visibility);
-        btnRefresh.setVisibility(visibility);
-    }
-
-    private void checkPermissions() {
-        List<String> permissions = new ArrayList<>();
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN)
-                    != PackageManager.PERMISSION_GRANTED) {
-                permissions.add(Manifest.permission.BLUETOOTH_SCAN);
-            }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
-                    != PackageManager.PERMISSION_GRANTED) {
-                permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
-            }
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        }
-
-        if (!permissions.isEmpty()) {
-            permissionLauncher.launch(permissions.toArray(new String[0]));
-        } else {
-            initBluetooth();
-        }
+    private void setupAnimations() {
+        // Pulse animation for live dot when connected
+        pulseAnimator = ObjectAnimator.ofFloat(liveDot, "alpha", 1f, 0.3f);
+        pulseAnimator.setDuration(1000);
+        pulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
+        pulseAnimator.setRepeatCount(ValueAnimator.INFINITE);
     }
 
     private void initBluetooth() {
@@ -228,29 +175,104 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+            setConnectionState(ConnectionState.DISCONNECTED);
             Toast.makeText(this, "Please enable Bluetooth", Toast.LENGTH_LONG).show();
             return;
         }
 
         bleScanner = bluetoothAdapter.getBluetoothLeScanner();
-        updateConnectionStatus("Ready to connect");
+        setConnectionState(ConnectionState.DISCONNECTED);
+    }
+
+    private enum ConnectionState {
+        DISCONNECTED, SCANNING, CONNECTING, CONNECTED
+    }
+
+    private void setConnectionState(ConnectionState state) {
+        GradientDrawable dot = new GradientDrawable();
+        dot.setShape(GradientDrawable.OVAL);
+        dot.setSize(dpToPx(10), dpToPx(10));
+
+        GradientDrawable liveDotDrawable = new GradientDrawable();
+        liveDotDrawable.setShape(GradientDrawable.OVAL);
+        liveDotDrawable.setSize(dpToPx(8), dpToPx(8));
+
+        switch (state) {
+            case DISCONNECTED:
+                dot.setColor(COLOR_DISCONNECTED);
+                liveDotDrawable.setColor(COLOR_DISCONNECTED);
+                tvConnectionStatus.setText("Disconnected");
+                tvConnectionStatus.setTextColor(COLOR_TEXT_SECONDARY);
+                btnConnect.setText("Connect to Router");
+                btnConnect.setEnabled(true);
+                if (pulseAnimator.isRunning()) pulseAnimator.cancel();
+                liveDot.setAlpha(1f);
+                break;
+
+            case SCANNING:
+                dot.setColor(COLOR_CONNECTING);
+                liveDotDrawable.setColor(COLOR_CONNECTING);
+                tvConnectionStatus.setText("Scanning...");
+                tvConnectionStatus.setTextColor(COLOR_CONNECTING);
+                btnConnect.setText("Scanning...");
+                btnConnect.setEnabled(false);
+                break;
+
+            case CONNECTING:
+                dot.setColor(COLOR_CONNECTING);
+                liveDotDrawable.setColor(COLOR_CONNECTING);
+                tvConnectionStatus.setText("Connecting...");
+                tvConnectionStatus.setTextColor(COLOR_CONNECTING);
+                btnConnect.setText("Connecting...");
+                btnConnect.setEnabled(false);
+                break;
+
+            case CONNECTED:
+                dot.setColor(COLOR_CONNECTED);
+                liveDotDrawable.setColor(COLOR_CONNECTED);
+                tvConnectionStatus.setText("Connected");
+                tvConnectionStatus.setTextColor(COLOR_CONNECTED);
+                btnConnect.setText("Disconnect");
+                btnConnect.setEnabled(true);
+                if (!pulseAnimator.isRunning()) pulseAnimator.start();
+                break;
+        }
+
+        statusDot.setBackground(dot);
+        liveDot.setBackground(liveDotDrawable);
+    }
+
+    private void checkPermissionsAndScan() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, PERMISSION_REQUEST_CODE);
+            return;
+        }
+        startScan();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            boolean allGranted = true;
+            for (int result : grantResults) {
+                if (result != PackageManager.PERMISSION_GRANTED) {
+                    allGranted = false;
+                    break;
+                }
+            }
+            if (allGranted) {
+                startScan();
+            } else {
+                Toast.makeText(this, "Bluetooth permissions required", Toast.LENGTH_SHORT).show();
+            }
+        }
     }
 
     private void startScan() {
-        if (bleScanner == null) {
-            Toast.makeText(this, "BLE Scanner not available", Toast.LENGTH_SHORT).show();
-            return;
-        }
+        if (bleScanner == null || isScanning) return;
 
-        if (isScanning) {
-            return;
-        }
+        setConnectionState(ConnectionState.SCANNING);
 
-        progressBar.setVisibility(View.VISIBLE);
-        updateConnectionStatus("Scanning for WigleWRT...");
-        btnConnect.setEnabled(false);
-
-        // Scan filter for WigleWRT service
         ScanFilter filter = new ScanFilter.Builder()
                 .setServiceUuid(new ParcelUuid(WIGLEWRT_SERVICE_UUID))
                 .build();
@@ -262,29 +284,29 @@ public class MainActivity extends AppCompatActivity {
         try {
             bleScanner.startScan(Arrays.asList(filter), settings, scanCallback);
             isScanning = true;
-
-            // Stop scan after timeout
-            handler.postDelayed(this::stopScan, SCAN_PERIOD);
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    stopScan();
+                }
+            }, SCAN_PERIOD);
         } catch (SecurityException e) {
-            Log.e(TAG, "Permission denied for BLE scan", e);
-            Toast.makeText(this, "Bluetooth permission denied", Toast.LENGTH_SHORT).show();
+            setConnectionState(ConnectionState.DISCONNECTED);
+            Toast.makeText(this, "Scan permission denied", Toast.LENGTH_SHORT).show();
         }
     }
 
     private void stopScan() {
         if (!isScanning) return;
-
         try {
             bleScanner.stopScan(scanCallback);
         } catch (SecurityException e) {
-            Log.e(TAG, "Permission denied for stopping scan", e);
+            Log.e(TAG, "Stop scan permission denied", e);
         }
         isScanning = false;
-        progressBar.setVisibility(View.GONE);
-        btnConnect.setEnabled(true);
-
         if (!isConnected) {
-            updateConnectionStatus("Device not found. Tap to retry.");
+            setConnectionState(ConnectionState.DISCONNECTED);
+            Toast.makeText(this, "WigleWRT device not found", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -301,61 +323,72 @@ public class MainActivity extends AppCompatActivity {
         public void onScanFailed(int errorCode) {
             Log.e(TAG, "Scan failed: " + errorCode);
             stopScan();
-            updateConnectionStatus("Scan failed. Tap to retry.");
+            setConnectionState(ConnectionState.DISCONNECTED);
         }
     };
 
     private void connectToDevice(BluetoothDevice device) {
-        updateConnectionStatus("Connecting...");
-        progressBar.setVisibility(View.VISIBLE);
-
+        setConnectionState(ConnectionState.CONNECTING);
         try {
             bluetoothGatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
         } catch (SecurityException e) {
-            Log.e(TAG, "Permission denied for GATT connection", e);
-            Toast.makeText(this, "Bluetooth permission denied", Toast.LENGTH_SHORT).show();
+            setConnectionState(ConnectionState.DISCONNECTED);
+            Toast.makeText(this, "Connection permission denied", Toast.LENGTH_SHORT).show();
         }
     }
 
     private void disconnect() {
-        refreshHandler.removeCallbacks(refreshRunnable);
-
+        handler.removeCallbacks(refreshRunnable);
         if (bluetoothGatt != null) {
             try {
                 bluetoothGatt.disconnect();
                 bluetoothGatt.close();
             } catch (SecurityException e) {
-                Log.e(TAG, "Permission denied for disconnect", e);
+                Log.e(TAG, "Disconnect permission denied", e);
             }
             bluetoothGatt = null;
         }
-
         isConnected = false;
         wiglewrtService = null;
-        updateConnectionStatus("Disconnected");
-        btnConnect.setText("Connect");
-        setCardsVisible(false);
+        setConnectionState(ConnectionState.DISCONNECTED);
+        resetUI();
+    }
+
+    private void resetUI() {
+        tvTotalNetworks.setText("0");
+        tvNewNetworks.setText("0");
+        tvScannerStatus.setText("Idle");
+        tvScannerStatus.setTextColor(COLOR_TEXT_MUTED);
+        tvSessionId.setText("--");
+        tvDuration.setText("--:--");
+        tvGpsStatus.setText("No Fix");
+        tvGpsStatus.setTextColor(COLOR_DISCONNECTED);
+        tvLatitude.setText("--");
+        tvLongitude.setText("--");
+        tvSatellites.setText("--");
+        tvFeedCount.setText("0 networks");
+        emptyState.setVisibility(View.VISIBLE);
+        networkList.setVisibility(View.GONE);
+        networkList.removeAllViews();
+        recentNetworks.clear();
     }
 
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.d(TAG, "Connected to GATT server");
                 try {
                     gatt.discoverServices();
                 } catch (SecurityException e) {
-                    Log.e(TAG, "Permission denied for service discovery", e);
+                    Log.e(TAG, "Service discovery permission denied", e);
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.d(TAG, "Disconnected from GATT server");
-                runOnUiThread(() -> {
-                    isConnected = false;
-                    progressBar.setVisibility(View.GONE);
-                    updateConnectionStatus("Disconnected");
-                    btnConnect.setText("Connect");
-                    btnConnect.setEnabled(true);
-                    setCardsVisible(false);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        isConnected = false;
+                        setConnectionState(ConnectionState.DISCONNECTED);
+                    }
                 });
             }
         }
@@ -365,25 +398,22 @@ public class MainActivity extends AppCompatActivity {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 wiglewrtService = gatt.getService(WIGLEWRT_SERVICE_UUID);
                 if (wiglewrtService != null) {
-                    runOnUiThread(() -> {
-                        isConnected = true;
-                        progressBar.setVisibility(View.GONE);
-                        updateConnectionStatus("Connected to WigleWRT");
-                        btnConnect.setText("Disconnect");
-                        btnConnect.setEnabled(true);
-                        setCardsVisible(true);
-
-                        // Start reading characteristics
-                        readAllCharacteristics();
-
-                        // Start periodic refresh
-                        refreshHandler.postDelayed(refreshRunnable, REFRESH_INTERVAL);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            isConnected = true;
+                            setConnectionState(ConnectionState.CONNECTED);
+                            readAllCharacteristics();
+                            handler.postDelayed(refreshRunnable, REFRESH_INTERVAL);
+                        }
                     });
                 } else {
-                    Log.e(TAG, "WigleWRT service not found");
-                    runOnUiThread(() -> {
-                        updateConnectionStatus("Service not found");
-                        disconnect();
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(MainActivity.this, "WigleWRT service not found", Toast.LENGTH_SHORT).show();
+                            disconnect();
+                        }
                     });
                 }
             }
@@ -394,10 +424,14 @@ public class MainActivity extends AppCompatActivity {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 byte[] data = characteristic.getValue();
                 if (data != null) {
-                    String json = new String(data, StandardCharsets.UTF_8);
-                    UUID uuid = characteristic.getUuid();
-
-                    runOnUiThread(() -> processCharacteristicData(uuid, json));
+                    final String json = new String(data, StandardCharsets.UTF_8);
+                    final UUID uuid = characteristic.getUuid();
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            processCharacteristicData(uuid, json);
+                        }
+                    });
                 }
             }
         }
@@ -406,179 +440,258 @@ public class MainActivity extends AppCompatActivity {
     private void readAllCharacteristics() {
         if (wiglewrtService == null || bluetoothGatt == null) return;
 
-        // Queue reads for all characteristics
         List<UUID> charUuids = Arrays.asList(
                 STATUS_CHAR_UUID,
                 GPS_CHAR_UUID,
                 SESSION_CHAR_UUID,
-                RADIOS_CHAR_UUID,
                 ACTIVITY_CHAR_UUID
         );
 
         readNextCharacteristic(charUuids, 0);
     }
 
-    private void readNextCharacteristic(List<UUID> uuids, int index) {
-        if (index >= uuids.size() || wiglewrtService == null || bluetoothGatt == null) return;
+    private void readNextCharacteristic(final List<UUID> uuids, final int index) {
+        if (index >= uuids.size() || wiglewrtService == null || bluetoothGatt == null) {
+            return;
+        }
 
         BluetoothGattCharacteristic characteristic = wiglewrtService.getCharacteristic(uuids.get(index));
         if (characteristic != null) {
             try {
                 bluetoothGatt.readCharacteristic(characteristic);
             } catch (SecurityException e) {
-                Log.e(TAG, "Permission denied for reading characteristic", e);
+                Log.e(TAG, "Read characteristic permission denied", e);
             }
         }
 
-        // Schedule next read
-        handler.postDelayed(() -> readNextCharacteristic(uuids, index + 1), 200);
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                readNextCharacteristic(uuids, index + 1);
+            }
+        }, 250);
     }
 
     private void processCharacteristicData(UUID uuid, String json) {
         try {
-            JsonObject data = gson.fromJson(json, JsonObject.class);
+            JSONObject data = new JSONObject(json);
 
             if (uuid.equals(STATUS_CHAR_UUID)) {
-                updateScannerStatus(data);
+                processStatusData(data);
             } else if (uuid.equals(GPS_CHAR_UUID)) {
-                updateGpsStatus(data);
+                processGpsData(data);
             } else if (uuid.equals(SESSION_CHAR_UUID)) {
-                updateSessionInfo(data);
-            } else if (uuid.equals(RADIOS_CHAR_UUID)) {
-                updateRadioConfig(data);
+                processSessionData(data);
             } else if (uuid.equals(ACTIVITY_CHAR_UUID)) {
-                updateActivity(data);
+                processActivityData(data);
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error parsing characteristic data: " + json, e);
+            Log.e(TAG, "Error parsing: " + json, e);
         }
     }
 
-    private void updateScannerStatus(JsonObject data) {
-        boolean running = data.has("running") && data.get("running").getAsBoolean();
-        int totalNetworks = data.has("total_networks") ? data.get("total_networks").getAsInt() : 0;
-        int sessionNew = data.has("session_new") ? data.get("session_new").getAsInt() : 0;
+    private void processStatusData(JSONObject data) {
+        boolean running = data.optBoolean("running", false);
+        totalNetworks = data.optInt("total_networks", 0);
+        newNetworks = data.optInt("session_new", 0);
 
-        tvScannerStatus.setText(running ? "Running" : "Stopped");
-        tvScannerStatus.setTextColor(getColor(running ? R.color.status_running : R.color.status_stopped));
         tvTotalNetworks.setText(String.valueOf(totalNetworks));
-        tvNewNetworks.setText(String.valueOf(sessionNew));
+        tvNewNetworks.setText(String.valueOf(newNetworks));
+
+        if (running) {
+            tvScannerStatus.setText("Running");
+            tvScannerStatus.setTextColor(COLOR_CONNECTED);
+        } else {
+            tvScannerStatus.setText("Stopped");
+            tvScannerStatus.setTextColor(COLOR_DISCONNECTED);
+        }
     }
 
-    private void updateGpsStatus(JsonObject data) {
-        boolean available = data.has("available") && data.get("available").getAsBoolean();
-        boolean fix = data.has("fix") && (data.get("fix").getAsBoolean() || data.get("fix").getAsInt() == 1);
-        int sats = data.has("sats") ? data.get("sats").getAsInt() : 0;
-        String lat = data.has("lat") ? data.get("lat").getAsString() : "";
-        String lon = data.has("lon") ? data.get("lon").getAsString() : "";
+    private void processGpsData(JSONObject data) {
+        boolean available = data.optBoolean("available", false);
+        boolean fix = data.optBoolean("fix", false) || data.optInt("fix", 0) == 1;
+        int sats = data.optInt("sats", 0);
+        String lat = data.optString("lat", "");
+        String lon = data.optString("lon", "");
 
-        String gpsText;
-        int color;
+        tvSatellites.setText(String.valueOf(sats));
 
         if (!available) {
-            gpsText = "No GPS device";
-            color = R.color.status_error;
+            tvGpsStatus.setText("No GPS");
+            tvGpsStatus.setTextColor(COLOR_DISCONNECTED);
+            tvLatitude.setText("--");
+            tvLongitude.setText("--");
         } else if (!fix) {
-            gpsText = "Searching (" + sats + " sats)";
-            color = R.color.status_warning;
+            tvGpsStatus.setText("Searching");
+            tvGpsStatus.setTextColor(COLOR_CONNECTING);
+            tvLatitude.setText("--");
+            tvLongitude.setText("--");
         } else {
-            gpsText = "Fix (" + sats + " sats): " + formatCoord(lat) + ", " + formatCoord(lon);
-            color = R.color.status_running;
+            tvGpsStatus.setText("Fix");
+            tvGpsStatus.setTextColor(COLOR_CONNECTED);
+            if (!lat.isEmpty()) {
+                try {
+                    double latVal = Double.parseDouble(lat);
+                    tvLatitude.setText(String.format("%.5f", latVal));
+                } catch (NumberFormatException e) {
+                    tvLatitude.setText(lat);
+                }
+            }
+            if (!lon.isEmpty()) {
+                try {
+                    double lonVal = Double.parseDouble(lon);
+                    tvLongitude.setText(String.format("%.5f", lonVal));
+                } catch (NumberFormatException e) {
+                    tvLongitude.setText(lon);
+                }
+            }
         }
-
-        tvGpsStatus.setText(gpsText);
-        tvGpsStatus.setTextColor(getColor(color));
     }
 
-    private String formatCoord(String coord) {
-        if (coord == null || coord.isEmpty()) return "-";
+    private void processSessionData(JSONObject data) {
+        String sessionId = data.optString("session_id", "--");
+        String startTime = data.optString("start_time", "");
+
+        // Shorten session ID for display
+        if (sessionId.length() > 8) {
+            sessionId = sessionId.substring(0, 8) + "...";
+        }
+        tvSessionId.setText(sessionId);
+
+        // Calculate duration if we have start time
+        if (!startTime.isEmpty()) {
+            sessionStartTime = startTime;
+            updateDuration();
+        }
+    }
+
+    private void updateDuration() {
+        if (sessionStartTime == null) return;
+        // Simple duration display
+        tvDuration.setText("Active");
+    }
+
+    private void processActivityData(JSONObject data) {
+        if (!data.has("entries")) return;
+
         try {
-            double d = Double.parseDouble(coord);
-            return String.format("%.5f", d);
-        } catch (NumberFormatException e) {
-            return coord;
-        }
-    }
+            JSONArray entries = data.getJSONArray("entries");
+            recentNetworks.clear();
 
-    private void updateSessionInfo(JsonObject data) {
-        String sessionId = data.has("session_id") ? data.get("session_id").getAsString() : "-";
-        String startTime = data.has("start_time") ? data.get("start_time").getAsString() : "-";
-        int newNetworks = data.has("new_networks") ? data.get("new_networks").getAsInt() : 0;
-
-        tvSessionId.setText(sessionId.isEmpty() ? "-" : sessionId);
-        tvSessionStart.setText(startTime.isEmpty() ? "-" : startTime);
-        tvNewNetworks.setText(String.valueOf(newNetworks));
-    }
-
-    private void updateRadioConfig(JsonObject data) {
-        layoutRadios.removeAllViews();
-
-        if (data.has("radios")) {
-            JsonArray radios = data.getAsJsonArray("radios");
-            for (int i = 0; i < radios.size(); i++) {
-                JsonObject radio = radios.get(i).getAsJsonObject();
-                String id = radio.has("id") ? radio.get("id").getAsString() : "radio" + i;
-                boolean enabled = radio.has("enabled") && radio.get("enabled").getAsBoolean();
-                String band = radio.has("band") ? radio.get("band").getAsString() : "unknown";
-                String channels = radio.has("channels") ? radio.get("channels").getAsString() : "";
-
-                TextView tv = new TextView(this);
-                String bandLabel = band.equals("2g") ? "2.4GHz" : band.equals("5g") ? "5GHz" : "Dual";
-                String status = enabled ? "Active" : "Disabled";
-                tv.setText(String.format("phy%d (%s): %s - Ch: %s", i, bandLabel, status, channels));
-                tv.setTextColor(getColor(enabled ? R.color.text_primary : R.color.text_secondary));
-                tv.setPadding(0, 4, 0, 4);
-                layoutRadios.addView(tv);
+            for (int i = 0; i < entries.length() && i < 10; i++) {
+                JSONObject entry = entries.getJSONObject(i);
+                NetworkEntry network = new NetworkEntry();
+                network.isNew = entry.optBoolean("is_new", false);
+                network.ssid = entry.optString("ssid", "<hidden>");
+                network.bssid = entry.optString("bssid", "");
+                network.channel = entry.optString("channel", "");
+                network.signal = entry.optInt("signal", -100);
+                network.encryption = entry.optString("encryption", "");
+                recentNetworks.add(network);
             }
-        }
 
-        if (data.has("hop_interval")) {
-            TextView tv = new TextView(this);
-            tv.setText("Hop interval: " + data.get("hop_interval").getAsString() + "ms");
-            tv.setTextColor(getColor(R.color.text_secondary));
-            tv.setPadding(0, 8, 0, 0);
-            layoutRadios.addView(tv);
+            updateNetworkList();
+        } catch (Exception e) {
+            Log.e(TAG, "Error parsing activity", e);
         }
     }
 
-    private void updateActivity(JsonObject data) {
-        List<NetworkEntry> entries = new ArrayList<>();
+    private void updateNetworkList() {
+        tvFeedCount.setText(recentNetworks.size() + " networks");
 
-        if (data.has("entries")) {
-            JsonArray arr = data.getAsJsonArray("entries");
-            for (int i = 0; i < arr.size(); i++) {
-                JsonObject entry = arr.get(i).getAsJsonObject();
-                NetworkEntry ne = new NetworkEntry();
-                ne.timestamp = entry.has("timestamp") ? entry.get("timestamp").getAsString() : "";
-                ne.bssid = entry.has("bssid") ? entry.get("bssid").getAsString() : "";
-                ne.ssid = entry.has("ssid") ? entry.get("ssid").getAsString() : "<hidden>";
-                ne.channel = entry.has("channel") ? entry.get("channel").getAsString() : "";
-                ne.signal = entry.has("signal") ? entry.get("signal").getAsString() : "";
-                ne.isNew = entry.has("is_new") && entry.get("is_new").getAsBoolean();
-                entries.add(ne);
+        if (recentNetworks.isEmpty()) {
+            emptyState.setVisibility(View.VISIBLE);
+            networkList.setVisibility(View.GONE);
+            return;
+        }
+
+        emptyState.setVisibility(View.GONE);
+        networkList.setVisibility(View.VISIBLE);
+        networkList.removeAllViews();
+
+        LayoutInflater inflater = LayoutInflater.from(this);
+
+        for (NetworkEntry network : recentNetworks) {
+            View itemView = inflater.inflate(R.layout.item_network, networkList, false);
+
+            TextView tvSsid = itemView.findViewById(R.id.tvSsid);
+            TextView tvBssid = itemView.findViewById(R.id.tvBssid);
+            TextView tvChannel = itemView.findViewById(R.id.tvChannel);
+            TextView tvSignal = itemView.findViewById(R.id.tvSignal);
+            TextView tvEncryption = itemView.findViewById(R.id.tvEncryption);
+            TextView tvNewBadge = itemView.findViewById(R.id.tvNewBadge);
+            TextView tvSignalIcon = itemView.findViewById(R.id.tvSignalIcon);
+
+            tvSsid.setText(network.ssid.isEmpty() ? "<hidden>" : network.ssid);
+            tvBssid.setText(network.bssid);
+            tvChannel.setText("Ch " + network.channel);
+            tvSignal.setText(network.signal + " dBm");
+
+            // Signal color
+            int signalColor;
+            if (network.signal >= -50) {
+                signalColor = COLOR_SIGNAL_EXCELLENT;
+                tvSignalIcon.setText("📶");
+            } else if (network.signal >= -60) {
+                signalColor = COLOR_SIGNAL_GOOD;
+                tvSignalIcon.setText("📶");
+            } else if (network.signal >= -70) {
+                signalColor = COLOR_SIGNAL_FAIR;
+                tvSignalIcon.setText("📶");
+            } else {
+                signalColor = COLOR_SIGNAL_WEAK;
+                tvSignalIcon.setText("📶");
             }
-        }
+            tvSignal.setTextColor(signalColor);
 
-        activityAdapter.setEntries(entries);
+            // Encryption color
+            String enc = network.encryption.toUpperCase();
+            tvEncryption.setText(enc.isEmpty() ? "OPEN" : enc);
+            if (enc.contains("WPA3")) {
+                tvEncryption.setTextColor(Color.parseColor("#10B981"));
+            } else if (enc.contains("WPA2")) {
+                tvEncryption.setTextColor(Color.parseColor("#22C55E"));
+            } else if (enc.contains("WPA")) {
+                tvEncryption.setTextColor(Color.parseColor("#F59E0B"));
+            } else if (enc.contains("WEP")) {
+                tvEncryption.setTextColor(Color.parseColor("#EF4444"));
+            } else {
+                tvEncryption.setTextColor(Color.parseColor("#DC2626"));
+            }
+
+            // New badge
+            if (network.isNew) {
+                tvNewBadge.setVisibility(View.VISIBLE);
+                itemView.setBackgroundResource(R.drawable.network_item_new);
+            } else {
+                tvNewBadge.setVisibility(View.GONE);
+                itemView.setBackgroundResource(R.drawable.network_item);
+            }
+
+            networkList.addView(itemView);
+        }
     }
 
-    private void updateConnectionStatus(String status) {
-        tvConnectionStatus.setText(status);
+    private int dpToPx(int dp) {
+        return (int) (dp * getResources().getDisplayMetrics().density);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (pulseAnimator != null) {
+            pulseAnimator.cancel();
+        }
         disconnect();
     }
 
-    // Inner class for network entries
-    public static class NetworkEntry {
-        public String timestamp;
-        public String bssid;
-        public String ssid;
-        public String channel;
-        public String signal;
-        public boolean isNew;
+    // Helper class for network entries
+    private static class NetworkEntry {
+        boolean isNew;
+        String ssid;
+        String bssid;
+        String channel;
+        int signal;
+        String encryption;
     }
 }

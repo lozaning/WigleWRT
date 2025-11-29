@@ -1,32 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Primary colors -->
-    <color name="primary">#2563EB</color>
-    <color name="primary_dark">#1D4ED8</color>
-    <color name="accent">#3B82F6</color>
+    <!-- Primary dark theme colors -->
+    <color name="background_dark">#0D1117</color>
+    <color name="background_card">#161B22</color>
+    <color name="background_elevated">#21262D</color>
 
-    <!-- Background colors -->
-    <color name="background">#1F2937</color>
-    <color name="card_background">#374151</color>
+    <!-- Glass effect colors -->
+    <color name="glass_background">#1A1F2E</color>
+    <color name="glass_border">#2D3748</color>
+    <color name="glass_highlight">#3D4A5C</color>
 
-    <!-- Text colors -->
-    <color name="text_primary">#F9FAFB</color>
-    <color name="text_secondary">#9CA3AF</color>
+    <!-- Accent colors -->
+    <color name="accent_primary">#58A6FF</color>
+    <color name="accent_secondary">#8B5CF6</color>
+    <color name="accent_gradient_start">#6366F1</color>
+    <color name="accent_gradient_end">#8B5CF6</color>
 
     <!-- Status colors -->
-    <color name="status_running">#22C55E</color>
-    <color name="status_stopped">#6B7280</color>
-    <color name="status_warning">#EAB308</color>
-    <color name="status_error">#EF4444</color>
+    <color name="status_connected">#10B981</color>
+    <color name="status_connecting">#F59E0B</color>
+    <color name="status_disconnected">#EF4444</color>
+    <color name="status_scanning">#3B82F6</color>
 
     <!-- Signal strength colors -->
-    <color name="signal_excellent">#22C55E</color>
-    <color name="signal_good">#84CC16</color>
-    <color name="signal_fair">#EAB308</color>
-    <color name="signal_poor">#EF4444</color>
+    <color name="signal_excellent">#10B981</color>
+    <color name="signal_good">#22C55E</color>
+    <color name="signal_fair">#F59E0B</color>
+    <color name="signal_weak">#EF4444</color>
 
-    <!-- Special -->
-    <color name="new_network">#3B82F6</color>
-    <color name="white">#FFFFFF</color>
-    <color name="black">#000000</color>
+    <!-- Text colors -->
+    <color name="text_primary">#F0F6FC</color>
+    <color name="text_secondary">#8B949E</color>
+    <color name="text_muted">#6E7681</color>
+
+    <!-- Encryption type colors -->
+    <color name="enc_wpa3">#10B981</color>
+    <color name="enc_wpa2">#22C55E</color>
+    <color name="enc_wpa">#F59E0B</color>
+    <color name="enc_wep">#EF4444</color>
+    <color name="enc_open">#DC2626</color>
+
+    <!-- Network type indicators -->
+    <color name="network_new">#8B5CF6</color>
+    <color name="network_seen">#6E7681</color>
 </resources>
