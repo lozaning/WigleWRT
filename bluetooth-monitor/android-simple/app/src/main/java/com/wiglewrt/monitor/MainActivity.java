@@ -131,8 +131,8 @@ public class MainActivity extends Activity {
 
         initRefreshRunnable();
         initViews();
-        initBluetooth();
         setupAnimations();
+        initBluetooth();
     }
 
     private void initViews() {
