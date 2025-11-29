@@ -1,0 +1,632 @@
+#!/bin/sh
+# WigleWRT - WiFi Scanning Daemon for OpenWRT
+# Scans for WiFi networks using all available radios with channel hopping
+# Stores results in flat files compatible with WiGLE CSV export
+# Supports GPS location tracking and LED status indicators
+
+# Read version from VERSION file (deployed to /usr/share/wiglewrt/VERSION or local)
+VERSION=$(cat /usr/share/wiglewrt/VERSION 2>/dev/null || cat "$(dirname "$0")/VERSION" 2>/dev/null || echo "2.1.0")
+DATA_DIR="/etc/wiglewrt"
+NETWORKS_FILE="$DATA_DIR/networks.tsv"
+SESSIONS_DIR="$DATA_DIR/sessions"
+CURRENT_SESSION=""
+SESSION_LOG=""
+PID_FILE="/var/run/wiglewrt.pid"
+SCAN_RUNNING=0
+
+# GPS Configuration
+GPS_DEVICE=""
+GPS_SOURCE="none"  # "gpsd", "direct", or "none"
+GPS_LAT=""
+GPS_LON=""
+GPS_ALT=""
+GPS_ACC=""
+GPS_VALID=0
+GPS_LAST_UPDATE=0
+
+# LED Control
+LED_PIPE="/tmp/wiglewrt_led.pipe"
+
+# Logging
+log() {
+    logger -t wiglewrt "$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$DATA_DIR/wiglewrt.log"
+}
+
+log_debug() {
+    [ "$DEBUG" = "1" ] && log "DEBUG: $1"
+}
+
+# Send LED command
+led_signal() {
+    [ -p "$LED_PIPE" ] && echo "$1" > "$LED_PIPE" 2>/dev/null &
+}
+
+# Initialize data directory
+init_data_dir() {
+    mkdir -p "$DATA_DIR"
+    mkdir -p "$SESSIONS_DIR"
+
+    # Create networks file with header if it doesn't exist
+    # Extended format with GPS columns
+    if [ ! -f "$NETWORKS_FILE" ]; then
+        echo "bssid	ssid	channel	signal	encryption	first_seen	last_seen	times_seen	first_lat	first_lon	first_alt	first_acc" > "$NETWORKS_FILE"
+        log "Created new networks database"
+    else
+        # Check if we need to migrate old format (8 columns to 12 columns)
+        COLS=$(head -1 "$NETWORKS_FILE" | awk -F'\t' '{print NF}')
+        if [ "$COLS" -eq 8 ]; then
+            log "Migrating networks database to new GPS format"
+            # Add empty GPS columns to header
+            sed -i '1s/$/\tfirst_lat\tfirst_lon\tfirst_alt\tfirst_acc/' "$NETWORKS_FILE"
+            # Add empty GPS columns to data rows
+            awk -F'\t' 'NR>1 {print $0"\t\t\t\t"}' "$NETWORKS_FILE" > "$NETWORKS_FILE.tmp"
+            head -1 "$NETWORKS_FILE" > "$NETWORKS_FILE.new"
+            cat "$NETWORKS_FILE.tmp" >> "$NETWORKS_FILE.new"
+            mv "$NETWORKS_FILE.new" "$NETWORKS_FILE"
+            rm -f "$NETWORKS_FILE.tmp"
+        fi
+    fi
+}
+
+# Get UCI configuration
+get_config() {
+    config_load wiglewrt
+
+    config_get ENABLED settings enabled 0
+    config_get SCAN_INTERVAL settings scan_interval 2
+    config_get HOP_INTERVAL settings hop_interval 500
+
+    # Get channels for each radio
+    config_get RADIO0_CHANNELS radio0 channels "1 6 11"
+    config_get RADIO1_CHANNELS radio1 channels "36 40 44 48 149 153 157 161 165"
+    config_get RADIO2_CHANNELS radio2 channels "1 6 11"
+    config_get RADIO2_BAND radio2 band "2g"
+
+    # GPS config
+    config_get GPS_ENABLED gps enabled 1
+    # GPS_DEVICE is auto-detected now, but can be overridden
+    config_get GPS_DEVICE gps device ""
+}
+
+# Initialize GPS - tries gpsd first, then auto-detects devices
+init_gps() {
+    # Method 1: Check if gpsd is available and running
+    if command -v gpspipe >/dev/null 2>&1; then
+        if timeout 2 gpspipe -w -n 1 >/dev/null 2>&1; then
+            GPS_SOURCE="gpsd"
+            GPS_DEVICE="gpsd"
+            log "GPS initialized via gpsd"
+            return 0
+        fi
+    fi
+
+    # Method 2: Auto-detect GPS device if not specified
+    if [ -z "$GPS_DEVICE" ]; then
+        for dev in /dev/ttyACM0 /dev/ttyACM1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/gps0 /dev/gps; do
+            if [ -c "$dev" ]; then
+                GPS_DEVICE="$dev"
+                GPS_SOURCE="direct"
+                log "GPS auto-detected at $GPS_DEVICE"
+                return 0
+            fi
+        done
+    elif [ -c "$GPS_DEVICE" ]; then
+        GPS_SOURCE="direct"
+        log "GPS initialized on $GPS_DEVICE"
+        return 0
+    fi
+
+    log "No GPS device found"
+    GPS_SOURCE="none"
+    return 1
+}
+
+# Parse NMEA GPRMC/GNRMC sentence for position
+# Format: $GNRMC,time,status,lat,N/S,lon,E/W,speed,course,date,variation,E/W,mode*checksum
+parse_rmc() {
+    local line="$1"
+    local status=$(echo "$line" | cut -d, -f3)
+
+    if [ "$status" = "A" ]; then
+        # Active fix
+        local lat_raw=$(echo "$line" | cut -d, -f4)
+        local lat_dir=$(echo "$line" | cut -d, -f5)
+        local lon_raw=$(echo "$line" | cut -d, -f6)
+        local lon_dir=$(echo "$line" | cut -d, -f7)
+
+        # Convert NMEA format (DDMM.MMMM) to decimal degrees
+        if [ -n "$lat_raw" ] && [ -n "$lon_raw" ]; then
+            # Latitude
+            local lat_deg=$(echo "$lat_raw" | cut -c1-2)
+            local lat_min=$(echo "$lat_raw" | cut -c3-)
+            GPS_LAT=$(awk "BEGIN {printf \"%.6f\", $lat_deg + ($lat_min / 60)}")
+            [ "$lat_dir" = "S" ] && GPS_LAT="-$GPS_LAT"
+
+            # Longitude
+            local lon_deg=$(echo "$lon_raw" | cut -c1-3)
+            local lon_min=$(echo "$lon_raw" | cut -c4-)
+            GPS_LON=$(awk "BEGIN {printf \"%.6f\", $lon_deg + ($lon_min / 60)}")
+            [ "$lon_dir" = "W" ] && GPS_LON="-$GPS_LON"
+
+            GPS_VALID=1
+            return 0
+        fi
+    fi
+
+    GPS_VALID=0
+    return 1
+}
+
+# Parse NMEA GPGGA/GNGGA for altitude and accuracy
+# Format: $GNGGA,time,lat,N/S,lon,E/W,quality,numSV,HDOP,alt,M,separation,M,age,refID*checksum
+parse_gga() {
+    local line="$1"
+    local quality=$(echo "$line" | cut -d, -f7)
+
+    if [ "$quality" -gt 0 ] 2>/dev/null; then
+        GPS_ALT=$(echo "$line" | cut -d, -f10)
+        local hdop=$(echo "$line" | cut -d, -f9)
+        # Approximate accuracy from HDOP (meters = HDOP * 5)
+        GPS_ACC=$(awk "BEGIN {printf \"%.1f\", $hdop * 5}" 2>/dev/null || echo "")
+    fi
+}
+
+# Update GPS position - uses gpsd or direct device access
+update_gps() {
+    # Method 1: Use gpsd if that's our source
+    if [ "$GPS_SOURCE" = "gpsd" ]; then
+        local gpsd_data=$(timeout 2 gpspipe -w -n 5 2>/dev/null | grep -m1 '"class":"TPV"')
+        if [ -n "$gpsd_data" ]; then
+            # Parse JSON from gpsd
+            local mode=$(echo "$gpsd_data" | sed 's/.*"mode":\([0-9]*\).*/\1/' 2>/dev/null)
+            if [ "$mode" = "2" ] || [ "$mode" = "3" ]; then
+                GPS_VALID=1
+                GPS_LAT=$(echo "$gpsd_data" | sed 's/.*"lat":\([^,}]*\).*/\1/' 2>/dev/null)
+                GPS_LON=$(echo "$gpsd_data" | sed 's/.*"lon":\([^,}]*\).*/\1/' 2>/dev/null)
+                GPS_ALT=$(echo "$gpsd_data" | sed 's/.*"alt":\([^,}]*\).*/\1/' 2>/dev/null)
+                # Get accuracy from epx/epy if available
+                local epx=$(echo "$gpsd_data" | sed 's/.*"epx":\([^,}]*\).*/\1/' 2>/dev/null)
+                [ -n "$epx" ] && GPS_ACC="$epx"
+            else
+                GPS_VALID=0
+            fi
+            return 0
+        fi
+        return 1
+    fi
+
+    # Method 2: Direct device access
+    [ "$GPS_SOURCE" != "direct" ] && return 1
+    [ ! -c "$GPS_DEVICE" ] && return 1
+
+    # Read GPS data using background cat with timeout
+    # This method works reliably unlike dd which may not capture complete sentences
+    local nmea_data=$(cat "$GPS_DEVICE" 2>/dev/null &
+        sleep 2
+        kill %1 2>/dev/null
+    )
+
+    # Parse RMC for position
+    local rmc_line=$(echo "$nmea_data" | grep -E '^\$G[NP]RMC' | head -1)
+    [ -n "$rmc_line" ] && parse_rmc "$rmc_line"
+
+    # Parse GGA for altitude
+    local gga_line=$(echo "$nmea_data" | grep -E '^\$G[NP]GGA' | head -1)
+    [ -n "$gga_line" ] && parse_gga "$gga_line"
+
+    return 0
+}
+
+# Start a new scan session
+start_session() {
+    CURRENT_SESSION=$(date '+%Y%m%d_%H%M%S')
+    SESSION_FILE="$SESSIONS_DIR/$CURRENT_SESSION.meta"
+    SESSION_LOG="$SESSIONS_DIR/$CURRENT_SESSION.log"
+
+    # Count current total networks
+    TOTAL_START=$(tail -n +2 "$NETWORKS_FILE" 2>/dev/null | wc -l)
+
+    echo "session_id=$CURRENT_SESSION" > "$SESSION_FILE"
+    echo "start_time=$(date '+%Y-%m-%d %H:%M:%S')" >> "$SESSION_FILE"
+    echo "networks_at_start=$TOTAL_START" >> "$SESSION_FILE"
+    echo "status=running" >> "$SESSION_FILE"
+
+    # Create session log with header
+    echo "timestamp	bssid	ssid	channel	signal	lat	lon	alt	acc	is_new" > "$SESSION_LOG"
+
+    log "Started scan session: $CURRENT_SESSION"
+}
+
+# End current scan session
+end_session() {
+    if [ -n "$CURRENT_SESSION" ]; then
+        SESSION_FILE="$SESSIONS_DIR/$CURRENT_SESSION.meta"
+
+        # Count final totals
+        TOTAL_END=$(tail -n +2 "$NETWORKS_FILE" 2>/dev/null | wc -l)
+        TOTAL_START=$(grep "networks_at_start=" "$SESSION_FILE" | cut -d= -f2)
+        NEW_NETWORKS=$((TOTAL_END - TOTAL_START))
+
+        echo "end_time=$(date '+%Y-%m-%d %H:%M:%S')" >> "$SESSION_FILE"
+        echo "networks_at_end=$TOTAL_END" >> "$SESSION_FILE"
+        echo "new_networks=$NEW_NETWORKS" >> "$SESSION_FILE"
+        sed -i 's/status=running/status=completed/' "$SESSION_FILE"
+
+        log "Ended scan session: $CURRENT_SESSION (found $NEW_NETWORKS new networks)"
+        CURRENT_SESSION=""
+    fi
+
+    # Signal LEDs to stop
+    led_signal "stop"
+}
+
+# Setup interface for scanning (managed mode)
+setup_scan_interface() {
+    local iface=$1
+    local phy=$2
+
+    log "Setting up scan interface $iface (phy: $phy)"
+
+    # Make sure interface is up and in managed mode
+    ip link set "$iface" down 2>/dev/null
+    iw dev "$iface" set type managed 2>/dev/null
+    ip link set "$iface" up 2>/dev/null
+
+    # Delete any leftover monitor interfaces
+    iw dev "${iface}mon" del 2>/dev/null
+
+    log "Scan interface $iface ready"
+    echo "$iface"
+}
+
+# Restore interface (no-op for managed mode)
+restore_interface() {
+    local iface=$1
+    log "Restoring interface $iface"
+    # No restoration needed for managed mode
+}
+
+# Set channel on interface
+set_channel() {
+    local iface=$1
+    local channel=$2
+
+    iw dev "$iface" set channel "$channel" 2>/dev/null
+}
+
+# Parse iw scan output and extract network info
+# Uses external awk script for reliable parsing
+parse_scan_output() {
+    awk -f /usr/bin/parse_scan.awk
+}
+
+# Add or update network in database
+# Returns: 0 if new network, 1 if existing
+update_network() {
+    local bssid=$1
+    local ssid=$2
+    local channel=$3
+    local signal=$4
+    local encryption=$5
+    local lat=$6
+    local lon=$7
+    local alt=$8
+    local acc=$9
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local is_new=0
+
+    # Escape tabs in SSID
+    ssid=$(echo "$ssid" | tr '\t' ' ')
+
+    # Check if network exists
+    if grep -q "^$bssid	" "$NETWORKS_FILE" 2>/dev/null; then
+        # Update existing entry - update last_seen and increment times_seen
+        awk -F'\t' -v b="$bssid" -v ts="$timestamp" -v ch="$channel" -v sig="$signal" '
+        BEGIN { OFS="\t" }
+        $1 == b {
+            $3 = ch   # Update channel (might have changed)
+            $4 = sig  # Update signal
+            $7 = ts   # Update last_seen
+            $8 = $8 + 1  # Increment times_seen
+        }
+        { print }
+        ' "$NETWORKS_FILE" > "$NETWORKS_FILE.tmp"
+        mv "$NETWORKS_FILE.tmp" "$NETWORKS_FILE"
+        is_new=0
+    else
+        # Add new entry with GPS data
+        echo "$bssid	$ssid	$channel	$signal	$encryption	$timestamp	$timestamp	1	$lat	$lon	$alt	$acc" >> "$NETWORKS_FILE"
+        log_debug "New network: $bssid ($ssid) on ch$channel"
+        is_new=1
+    fi
+
+    # Write to session log
+    if [ -n "$SESSION_LOG" ]; then
+        echo "$timestamp	$bssid	$ssid	$channel	$signal	$lat	$lon	$alt	$acc	$is_new" >> "$SESSION_LOG"
+    fi
+
+    return $is_new
+}
+
+# Perform scan on interface
+do_scan() {
+    local iface=$1
+    local tmpfile="/tmp/wiglewrt_scan_$$.tmp"
+
+    # Update GPS before scanning
+    update_gps
+
+    # Trigger scan and get results, save to temp file to avoid subshell issues
+    iw dev "$iface" scan 2>/dev/null | parse_scan_output > "$tmpfile"
+
+    local network_count=0
+    local new_count=0
+
+    # Process each line from the temp file
+    while IFS='	' read -r bssid ssid channel signal encryption; do
+        if [ -n "$bssid" ]; then
+            network_count=$((network_count + 1))
+
+            # Update network with GPS data
+            update_network "$bssid" "$ssid" "$channel" "$signal" "$encryption" \
+                          "$GPS_LAT" "$GPS_LON" "$GPS_ALT" "$GPS_ACC"
+
+            if [ $? -eq 1 ]; then
+                # New network - blue pulse
+                new_count=$((new_count + 1))
+                led_signal "new_network"
+            fi
+            # Note: We don't pulse for every existing network anymore
+            # as it overwhelms the chase effect. Chase alone indicates scanning.
+        fi
+    done < "$tmpfile"
+
+    rm -f "$tmpfile"
+
+    log_debug "Scan found $network_count networks ($new_count new)"
+}
+
+# Get available interfaces and their capabilities
+get_interfaces() {
+    iw dev 2>/dev/null | awk '
+    /^phy#/ {
+        phy = $0
+        gsub(/phy#/, "phy", phy)
+    }
+    /Interface/ {
+        if (phy != "") print $2, phy
+    }
+    '
+}
+
+# Main scanning loop
+scan_loop() {
+    SCAN_RUNNING=1
+
+    # Start LED daemon if not running
+    if ! pidof wiglewrt-leds >/dev/null 2>&1; then
+        /usr/bin/wiglewrt-leds start &
+        sleep 1
+    fi
+
+    # Setup monitor interfaces
+    MON_IFACES=""
+
+    # Get all wireless interfaces
+    current_phy=""
+    iw dev 2>/dev/null | while read -r line; do
+        case "$line" in
+            phy*)
+                current_phy=$(echo "$line" | sed 's/phy#/phy/')
+                ;;
+            *Interface*)
+                iface=$(echo "$line" | awk '{print $2}')
+                if [ -n "$iface" ] && [ -n "$current_phy" ]; then
+                    echo "$iface:$current_phy"
+                fi
+                ;;
+        esac
+    done > /tmp/wiglewrt_ifaces.tmp
+
+    for entry in $(cat /tmp/wiglewrt_ifaces.tmp 2>/dev/null); do
+        iface=$(echo "$entry" | cut -d: -f1)
+        phy=$(echo "$entry" | cut -d: -f2)
+
+        if [ -n "$iface" ] && [ -n "$phy" ]; then
+            scan_iface=$(setup_scan_interface "$iface" "$phy")
+            MON_IFACES="$MON_IFACES $scan_iface:$phy"
+        fi
+    done
+
+    rm -f /tmp/wiglewrt_ifaces.tmp
+
+    log "Scan interfaces ready: $MON_IFACES"
+
+    # Initialize GPS
+    init_gps
+
+    # Main scan loop
+    while [ $SCAN_RUNNING -eq 1 ]; do
+        # Update GPS status for LED mode
+        update_gps
+        if [ $GPS_VALID -eq 1 ]; then
+            led_signal "scan_gps"
+        else
+            led_signal "scan_nogps"
+        fi
+
+        # Launch scans on all radios in parallel for maximum speed
+        for entry in $MON_IFACES; do
+            [ $SCAN_RUNNING -eq 0 ] && break
+
+            iface=$(echo "$entry" | cut -d: -f1)
+            phy=$(echo "$entry" | cut -d: -f2)
+
+            log_debug "Scanning on $iface ($phy)"
+            do_scan "$iface" &
+        done
+        # Wait for all parallel scans to complete
+        wait
+
+        # No sleep - immediately start next scan cycle for maximum network capture
+    done
+
+    # Cleanup - restore interfaces
+    for entry in $MON_IFACES; do
+        iface=$(echo "$entry" | cut -d: -f1)
+        restore_interface "$iface"
+    done
+
+    log "Scanning stopped, interfaces restored"
+}
+
+# Signal handlers
+handle_stop() {
+    log "Received stop signal"
+    SCAN_RUNNING=0
+    end_session
+    rm -f "$PID_FILE"
+    exit 0
+}
+
+# Status function
+show_status() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "Status: Running (PID: $(cat "$PID_FILE"))"
+
+        # Show current session info
+        CURRENT=$(ls -t "$SESSIONS_DIR"/*.meta 2>/dev/null | head -1)
+        if [ -n "$CURRENT" ] && grep -q "status=running" "$CURRENT" 2>/dev/null; then
+            echo "Session: $(basename "$CURRENT" .meta)"
+            START=$(grep "start_time=" "$CURRENT" | cut -d= -f2)
+            echo "Started: $START"
+        fi
+
+        # Show GPS status
+        if [ -c "$GPS_DEVICE" ]; then
+            echo "GPS: Available ($GPS_DEVICE)"
+        else
+            echo "GPS: Not found"
+        fi
+    else
+        echo "Status: Stopped"
+    fi
+
+    # Show network stats
+    TOTAL=$(tail -n +2 "$NETWORKS_FILE" 2>/dev/null | wc -l)
+    echo "Total networks: $TOTAL"
+}
+
+# Usage information
+usage() {
+    cat << EOF
+WigleWRT v$VERSION - WiFi Scanning Daemon for OpenWRT
+
+Usage: $0 [command]
+
+Commands:
+    start       Start scanning daemon
+    stop        Stop scanning daemon
+    status      Show current status
+    stats       Show detailed statistics
+    export      Export networks to WiGLE CSV format
+    help        Show this help message
+
+Configuration is read from /etc/config/wiglewrt
+Data is stored in $DATA_DIR
+EOF
+}
+
+# Parse arguments
+case "$1" in
+    start)
+        # Check if already running
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "WigleWRT is already running (PID: $(cat "$PID_FILE"))"
+            exit 1
+        fi
+
+        # Load configuration
+        . /lib/functions.sh
+        get_config
+
+        # Initialize
+        init_data_dir
+
+        # Setup signal handlers
+        trap handle_stop INT TERM
+
+        # Write PID
+        echo $$ > "$PID_FILE"
+
+        log "WigleWRT v$VERSION starting"
+
+        # Start session and scan
+        start_session
+        scan_loop
+        ;;
+
+    stop)
+        if [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE")
+            if kill -0 "$PID" 2>/dev/null; then
+                log "Stopping WigleWRT (PID: $PID)"
+                kill "$PID"
+                sleep 1
+                # Force kill if still running
+                kill -0 "$PID" 2>/dev/null && kill -9 "$PID"
+                rm -f "$PID_FILE"
+                echo "WigleWRT stopped"
+            else
+                rm -f "$PID_FILE"
+                echo "WigleWRT was not running"
+            fi
+        else
+            echo "WigleWRT is not running"
+        fi
+
+        # Stop LED daemon
+        /usr/bin/wiglewrt-leds stop 2>/dev/null
+        ;;
+
+    status)
+        show_status
+        ;;
+
+    stats)
+        echo "=== WigleWRT Statistics ==="
+        echo ""
+        show_status
+        echo ""
+        echo "=== Recent Sessions ==="
+        for meta in $(ls -t "$SESSIONS_DIR"/*.meta 2>/dev/null | head -10); do
+            session=$(basename "$meta" .meta)
+            start=$(grep "start_time=" "$meta" | cut -d= -f2)
+            end=$(grep "end_time=" "$meta" | cut -d= -f2)
+            new=$(grep "new_networks=" "$meta" | cut -d= -f2)
+            total=$(grep "networks_at_end=" "$meta" | cut -d= -f2)
+            status=$(grep "status=" "$meta" | cut -d= -f2)
+            echo "$session: $start - ${end:-ongoing} | New: ${new:-?} | Total: ${total:-?} | $status"
+        done
+        ;;
+
+    export)
+        # Export is handled by separate script
+        /usr/bin/wiglewrt-export "$2"
+        ;;
+
+    help|--help|-h)
+        usage
+        ;;
+
+    --version|-V)
+        echo "wiglewrt $VERSION"
+        exit 0
+        ;;
+
+    *)
+        usage
+        exit 1
+        ;;
+esac

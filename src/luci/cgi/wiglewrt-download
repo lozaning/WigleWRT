@@ -1,0 +1,30 @@
+#!/bin/sh
+# CGI script for downloading WigleWRT CSV exports
+
+# Parse query string and URL-decode the file parameter
+file=$(echo "$QUERY_STRING" | sed 's/.*file=\([^&]*\).*/\1/' | sed 's/%2F/\//g; s/%20/ /g; s/+/ /g')
+
+# Security: Only allow files from the exports directory
+EXPORT_DIR="/etc/wiglewrt/exports"
+case "$file" in
+    "$EXPORT_DIR"/*.csv)
+        if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            echo "Content-Type: text/csv"
+            echo "Content-Disposition: attachment; filename=\"$filename\""
+            echo ""
+            cat "$file"
+        else
+            echo "Status: 404 Not Found"
+            echo "Content-Type: text/plain"
+            echo ""
+            echo "File not found"
+        fi
+        ;;
+    *)
+        echo "Status: 403 Forbidden"
+        echo "Content-Type: text/plain"
+        echo ""
+        echo "Access denied"
+        ;;
+esac

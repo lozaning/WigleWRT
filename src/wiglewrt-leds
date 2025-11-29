@@ -1,0 +1,289 @@
+#!/bin/sh
+# WigleWRT LED Controller Daemon
+# Controls the OnHub ring LEDs based on scanner status
+
+# Read version from VERSION file (deployed to /usr/share/wiglewrt/VERSION or local)
+VERSION=$(cat /usr/share/wiglewrt/VERSION 2>/dev/null || cat "$(dirname "$0")/VERSION" 2>/dev/null || echo "2.3.0")
+
+LED_PIPE="/tmp/wiglewrt_led.pipe"
+LED_BASE="/sys/class/leds"
+NUM_LEDS=6
+
+# Animation timing (seconds) - adjust this to change speed
+# 6 LEDs * 3 rotations per second = 18 frames per second = ~0.055s per frame
+CHASE_INTERVAL=0.055
+
+# LED positions are 0-5 in a ring
+# Each has red, green, blue channels
+
+# State file for IPC
+STATE_FILE="/tmp/wiglewrt_led_state"
+
+# State variables
+CURRENT_MODE="idle"
+GPS_LOCK=0
+CHASE_POS=0
+FLASH_ACTIVE=0
+FLASH_FRAMES=0
+
+# Set a single LED color
+set_led() {
+    local pos=$1
+    local r=$2
+    local g=$3
+    local b=$4
+
+    echo "$r" > "$LED_BASE/red:status-$pos/brightness"
+    echo "$g" > "$LED_BASE/green:status-$pos/brightness"
+    echo "$b" > "$LED_BASE/blue:status-$pos/brightness"
+}
+
+# Sync placeholder (no longer needed but keep for compatibility)
+sync_leds() {
+    :
+}
+
+# Set all LEDs to same color
+set_all_leds() {
+    local r=$1
+    local g=$2
+    local b=$3
+
+    for i in 0 1 2 3 4 5; do
+        set_led $i $r $g $b
+    done
+    sync_leds
+}
+
+# Turn all LEDs off
+leds_off() {
+    set_all_leds 0 0 0
+}
+
+# Smooth fade chase effect - gradient around the ring
+# Red if no GPS lock, green if GPS lock
+# Position 0 = max brightness, fading in both directions, one LED off
+do_chase() {
+    local r g b
+
+    # Read GPS_LOCK from state file
+    read MODE GPS_LOCK FLASH < "$STATE_FILE" 2>/dev/null
+
+    if [ "$GPS_LOCK" = "1" ]; then
+        # Green chase - GPS lock
+        r=0; g=255; b=0
+    else
+        # Red chase - no GPS lock
+        r=255; g=0; b=0
+    fi
+
+    # Set all 6 LEDs with smooth gradient
+    # Distance from head determines brightness:
+    # 0 = 100%, 1 = 60%, 2 = 35%, 3 = 0% (off), 4 = 20%, 5 = 40%
+    # This creates a smooth comet-like fade with one LED off
+
+    # Only update the 4 LEDs that change each frame (optimization)
+    # The head moves forward, so we update: new head, old head (now 60%),
+    # the one becoming off, and the one waking up
+
+    local new_head=$CHASE_POS
+    local behind1=$(( (CHASE_POS + 5) % 6 ))
+    local behind2=$(( (CHASE_POS + 4) % 6 ))
+    local off_pos=$(( (CHASE_POS + 3) % 6 ))
+    local ahead2=$(( (CHASE_POS + 2) % 6 ))
+    local ahead1=$(( (CHASE_POS + 1) % 6 ))
+
+    # Update all positions (parallel writes make this fast)
+    set_led $new_head $r $g $b
+    set_led $behind1 $((r*60/100)) $((g*60/100)) $((b*60/100))
+    set_led $behind2 $((r*35/100)) $((g*35/100)) $((b*35/100))
+    set_led $off_pos 0 0 0
+    set_led $ahead2 $((r*20/100)) $((g*20/100)) $((b*20/100))
+    set_led $ahead1 $((r*40/100)) $((g*40/100)) $((b*40/100))
+
+    # Wait for all LED writes to complete
+    sync_leds
+
+    # Precise timing control
+    sleep $CHASE_INTERVAL
+
+    # Move to next position
+    CHASE_POS=$(( (CHASE_POS + 1) % 6 ))
+}
+
+# Bright white flash for new network (very brief)
+do_flash() {
+    set_all_leds 255 255 255
+    FLASH_ACTIVE=1
+    FLASH_FRAMES=1  # Will be cleared on next frame (~50ms)
+}
+
+# Process LED command from pipe
+process_command() {
+    local cmd="$1"
+
+    case "$cmd" in
+        scan_nogps)
+            CURRENT_MODE="chase"
+            GPS_LOCK=0
+            ;;
+        scan_gps)
+            CURRENT_MODE="chase"
+            GPS_LOCK=1
+            ;;
+        gps_lock)
+            GPS_LOCK=1
+            ;;
+        gps_lost)
+            GPS_LOCK=0
+            ;;
+        stop)
+            CURRENT_MODE="idle"
+            leds_off
+            ;;
+        new_network)
+            # Bright white flash for new unique network
+            do_flash
+            ;;
+        off)
+            CURRENT_MODE="idle"
+            leds_off
+            ;;
+    esac
+}
+
+# Main loop - runs fast for smooth animation
+main_loop() {
+    # Initialize state file
+    echo "idle 0 0" > "$STATE_FILE"
+
+    # Start a background process to read from the pipe and update state file
+    (
+        while true; do
+            if read cmd < "$LED_PIPE"; then
+                case "$cmd" in
+                    scan_nogps)
+                        sed -i 's/^[^ ]*/chase/' "$STATE_FILE"
+                        sed -i 's/ [0-9]* / 0 /' "$STATE_FILE"
+                        ;;
+                    scan_gps)
+                        sed -i 's/^[^ ]*/chase/' "$STATE_FILE"
+                        sed -i 's/ [0-9]* / 1 /' "$STATE_FILE"
+                        ;;
+                    gps_lock)
+                        sed -i 's/ [0-9]* / 1 /' "$STATE_FILE"
+                        ;;
+                    gps_lost)
+                        sed -i 's/ [0-9]* / 0 /' "$STATE_FILE"
+                        ;;
+                    new_network)
+                        # Set flash flag
+                        sed -i 's/ [0-9]*$/ 1/' "$STATE_FILE"
+                        ;;
+                    stop|off)
+                        echo "idle 0 0" > "$STATE_FILE"
+                        ;;
+                esac
+            fi
+        done
+    ) &
+    PIPE_PID=$!
+
+    # Animation loop
+    while true; do
+        # Read current state: MODE GPS_LOCK FLASH
+        read MODE GPS_LOCK FLASH < "$STATE_FILE"
+
+        # Handle flash
+        if [ "$FLASH" = "1" ]; then
+            do_flash
+            sleep 0.05
+            # Clear flash flag
+            sed -i 's/ [0-9]*$/ 0/' "$STATE_FILE"
+        fi
+
+        # Update display based on mode
+        case "$MODE" in
+            chase)
+                do_chase
+                ;;
+            idle)
+                leds_off
+                sleep 0.1
+                ;;
+        esac
+    done
+}
+
+# Setup
+setup() {
+    # Create named pipe if it doesn't exist
+    [ ! -p "$LED_PIPE" ] && mkfifo "$LED_PIPE"
+
+    # Start with LEDs off
+    leds_off
+
+    logger -t wiglewrt-leds "LED daemon started"
+}
+
+# Cleanup
+cleanup() {
+    leds_off
+    rm -f "$LED_PIPE"
+    logger -t wiglewrt-leds "LED daemon stopped"
+    exit 0
+}
+
+# Signal handlers
+trap cleanup INT TERM
+
+# Main
+case "$1" in
+    start)
+        setup
+        main_loop
+        ;;
+    stop)
+        # Send stop command to running daemon
+        [ -p "$LED_PIPE" ] && echo "off" > "$LED_PIPE"
+        pkill -f "wiglewrt-leds start"
+        ;;
+    test)
+        # Test mode - demonstrate effects
+        setup
+        echo "Testing red chase (no GPS) - 4 full rotations..."
+        CURRENT_MODE="chase"
+        GPS_LOCK=0
+        for i in $(seq 1 24); do
+            do_chase
+        done
+
+        echo "Testing green chase (GPS lock) - 4 full rotations..."
+        GPS_LOCK=1
+        for i in $(seq 1 24); do
+            do_chase
+        done
+
+        echo "Testing white flash (new network)..."
+        do_flash
+        sleep 1
+        FLASH_ACTIVE=0
+
+        # Resume chase briefly
+        echo "Back to green chase - 2 rotations..."
+        for i in $(seq 1 12); do
+            do_chase
+        done
+
+        leds_off
+        echo "Test complete"
+        ;;
+    --version|-V)
+        echo "wiglewrt-leds $VERSION"
+        exit 0
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|test|--version}"
+        exit 1
+        ;;
+esac
