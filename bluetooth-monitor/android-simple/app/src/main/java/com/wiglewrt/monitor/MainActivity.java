@@ -113,10 +113,13 @@ public class MainActivity extends Activity {
     private Runnable refreshRunnable;
 
     private void initRefreshRunnable() {
-        refreshRunnable = () -> {
-            if (isConnected) {
-                readAllCharacteristics();
-                handler.postDelayed(refreshRunnable, REFRESH_INTERVAL);
+        refreshRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (isConnected) {
+                    readAllCharacteristics();
+                    handler.postDelayed(refreshRunnable, REFRESH_INTERVAL);
+                }
             }
         };
     }
@@ -150,11 +153,14 @@ public class MainActivity extends Activity {
         emptyState = findViewById(R.id.emptyState);
         networkList = findViewById(R.id.networkList);
 
-        btnConnect.setOnClickListener(v -> {
-            if (isConnected) {
-                disconnect();
-            } else {
-                checkPermissionsAndScan();
+        btnConnect.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (isConnected) {
+                    disconnect();
+                } else {
+                    checkPermissionsAndScan();
+                }
             }
         });
     }
@@ -283,7 +289,12 @@ public class MainActivity extends Activity {
         try {
             bleScanner.startScan(Arrays.asList(filter), settings, scanCallback);
             isScanning = true;
-            handler.postDelayed(() -> stopScan(), SCAN_PERIOD);
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    stopScan();
+                }
+            }, SCAN_PERIOD);
         } catch (SecurityException e) {
             setConnectionState(ConnectionState.DISCONNECTED);
             Toast.makeText(this, "Scan permission denied", Toast.LENGTH_SHORT).show();
@@ -304,7 +315,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    private final ScanCallback scanCallback = new ScanCallback() {
+    private final ScanCallback scanCallback = new MyScanCallback();
+
+    private class MyScanCallback extends ScanCallback {
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
             BluetoothDevice device = result.getDevice();
@@ -319,7 +332,7 @@ public class MainActivity extends Activity {
             stopScan();
             setConnectionState(ConnectionState.DISCONNECTED);
         }
-    };
+    }
 
     private void connectToDevice(BluetoothDevice device) {
         setConnectionState(ConnectionState.CONNECTING);
@@ -367,7 +380,9 @@ public class MainActivity extends Activity {
         recentNetworks.clear();
     }
 
-    private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
+    private final BluetoothGattCallback gattCallback = new MyGattCallback();
+
+    private class MyGattCallback extends BluetoothGattCallback {
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
@@ -377,9 +392,12 @@ public class MainActivity extends Activity {
                     Log.e(TAG, "Service discovery permission denied", e);
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                runOnUiThread(() -> {
-                    isConnected = false;
-                    setConnectionState(ConnectionState.DISCONNECTED);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        isConnected = false;
+                        setConnectionState(ConnectionState.DISCONNECTED);
+                    }
                 });
             }
         }
@@ -389,16 +407,22 @@ public class MainActivity extends Activity {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 wiglewrtService = gatt.getService(WIGLEWRT_SERVICE_UUID);
                 if (wiglewrtService != null) {
-                    runOnUiThread(() -> {
-                        isConnected = true;
-                        setConnectionState(ConnectionState.CONNECTED);
-                        readAllCharacteristics();
-                        handler.postDelayed(refreshRunnable, REFRESH_INTERVAL);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            isConnected = true;
+                            setConnectionState(ConnectionState.CONNECTED);
+                            readAllCharacteristics();
+                            handler.postDelayed(refreshRunnable, REFRESH_INTERVAL);
+                        }
                     });
                 } else {
-                    runOnUiThread(() -> {
-                        Toast.makeText(MainActivity.this, "WigleWRT service not found", Toast.LENGTH_SHORT).show();
-                        disconnect();
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(MainActivity.this, "WigleWRT service not found", Toast.LENGTH_SHORT).show();
+                            disconnect();
+                        }
                     });
                 }
             }
@@ -411,11 +435,16 @@ public class MainActivity extends Activity {
                 if (data != null) {
                     final String json = new String(data, StandardCharsets.UTF_8);
                     final UUID uuid = characteristic.getUuid();
-                    runOnUiThread(() -> processCharacteristicData(uuid, json));
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            processCharacteristicData(uuid, json);
+                        }
+                    });
                 }
             }
         }
-    };
+    }
 
     private void readAllCharacteristics() {
         if (wiglewrtService == null || bluetoothGatt == null) return;
@@ -444,7 +473,13 @@ public class MainActivity extends Activity {
             }
         }
 
-        handler.postDelayed(() -> readNextCharacteristic(uuids, index + 1), 250);
+        final int nextIndex = index + 1;
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                readNextCharacteristic(uuids, nextIndex);
+            }
+        }, 250);
     }
 
     private void processCharacteristicData(UUID uuid, String json) {
