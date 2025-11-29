@@ -16,7 +16,7 @@
     <application
         android:allowBackup="true"
         android:label="WigleWRT Monitor"
-        android:theme="@android:style/Theme.DeviceDefault.Light.DarkActionBar">
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
             android:name=".MainActivity"
