@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:paddingVertical="8dp"
+    android:paddingHorizontal="4dp"
+    android:gravity="center_vertical">
+
+    <!-- New indicator -->
+    <TextView
+        android:id="@+id/tvIndicator"
+        android:layout_width="24dp"
+        android:layout_height="wrap_content"
+        android:text="o"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:gravity="center"/>
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:layout_marginStart="8dp">
+
+        <!-- SSID -->
+        <TextView
+            android:id="@+id/tvSsid"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="14sp"
+            android:textColor="@color/text_primary"
+            android:maxLines="1"
+            android:ellipsize="end"/>
+
+        <!-- BSSID -->
+        <TextView
+            android:id="@+id/tvBssid"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="11sp"
+            android:textColor="@color/text_secondary"
+            android:fontFamily="monospace"/>
+
+        <!-- Details -->
+        <TextView
+            android:id="@+id/tvDetails"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="11sp"
+            android:textColor="@color/text_secondary"/>
+
+    </LinearLayout>
+
+</LinearLayout>

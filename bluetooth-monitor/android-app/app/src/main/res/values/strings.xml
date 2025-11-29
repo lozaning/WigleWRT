@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WigleWRT Monitor</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="refresh">Refresh</string>
+    <string name="scanning">Scanning for WigleWRT...</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="not_connected">Not connected</string>
+    <string name="scanner_status">Scanner Status</string>
+    <string name="gps_status">GPS Status</string>
+    <string name="current_session">Current Session</string>
+    <string name="radio_config">Radio Configuration</string>
+    <string name="recent_activity">Recent Activity</string>
+</resources>
