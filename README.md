@@ -1,6 +1,6 @@
 # WigleWRT
 
-WiFi wardriving scanner for OpenWRT. Scans networks, logs GPS coordinates, exports to WiGLE CSV format.
+Wigle.net war-driving plug-in for OpenWRT. Scans networks, logs GPS coordinates, exports to WiGLE CSV format.
 
 <img width="893" height="762" alt="image" src="https://github.com/user-attachments/assets/e07a4524-55b5-4dd2-8ddb-b4fa7742d6a5" />
 <img width="891" height="676" alt="image" src="https://github.com/user-attachments/assets/3e4455c6-b7d7-4bf4-abc8-496a72f78d7e" />
