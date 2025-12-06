@@ -160,6 +160,7 @@ EOF
 # Current scan method - returns live network sightings from current session CSV
 current_scan() {
     local limit=${1:-50}
+    local source_file="/tmp/wiglewrt/source_tracking.txt"
 
     if [ ! -f "$CURRENT_SESSION" ]; then
         echo '{"total": 0, "networks": []}'
@@ -176,9 +177,21 @@ current_scan() {
 
     # Read last N lines in reverse order (most recent first)
     # CSV format: MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,Lat,Lon,Alt,Acc,Type
+    # Source tracking format: BSSID|timestamp|source
     tail -n +3 "$CURRENT_SESSION" 2>/dev/null | tail -n "$limit" | awk '{a[NR]=$0} END {for(i=NR;i>=1;i--) print a[i]}' | \
-        awk -F',' '
-        BEGIN { first = 1 }
+        awk -F',' -v srcfile="$source_file" '
+        BEGIN {
+            first = 1
+            # Load source tracking into associative array (bssid|timestamp -> source)
+            while ((getline line < srcfile) > 0) {
+                n = split(line, parts, "|")
+                if (n >= 3) {
+                    key = parts[1] "|" parts[2]
+                    sources[key] = parts[3]
+                }
+            }
+            close(srcfile)
+        }
         {
             if ($1 == "") next
             if (!first) printf ","
@@ -192,13 +205,17 @@ current_scan() {
             signal = $6
             lat = $7
             lon = $8
+            # Look up source
+            key = bssid "|" ts
+            source = sources[key]
+            if (source == "") source = "control"
             # Clean SSID
             gsub(/\\/, "\\\\", ssid)
             gsub(/"/, "\\\"", ssid)
             gsub(/[[:cntrl:]]/, "", ssid)
             if (ssid == "") ssid = "<hidden>"
-            printf "\n    {\"time\":\"%s\",\"bssid\":\"%s\",\"ssid\":\"%s\",\"channel\":\"%s\",\"signal\":\"%s\",\"encryption\":\"%s\",\"lat\":\"%s\",\"lon\":\"%s\"}", \
-                ts, bssid, ssid, channel, signal, enc, lat, lon
+            printf "\n    {\"time\":\"%s\",\"bssid\":\"%s\",\"ssid\":\"%s\",\"channel\":\"%s\",\"signal\":\"%s\",\"encryption\":\"%s\",\"lat\":\"%s\",\"lon\":\"%s\",\"source\":\"%s\"}", \
+                ts, bssid, ssid, channel, signal, enc, lat, lon, source
         }
         END { printf "\n" }
         '

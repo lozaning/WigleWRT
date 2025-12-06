@@ -90,8 +90,8 @@ start_session() {
         log info "Archived previous session: ${archive_id}.csv"
     fi
 
-    # Clear seen BSSIDs file
-    rm -f "$WIGLEWRT_TMP/seen_bssids.txt"
+    # Clear seen BSSIDs file and source tracking (source tracking is UI-only, not in CSV)
+    rm -f "$WIGLEWRT_TMP/seen_bssids.txt" "$WIGLEWRT_TMP/source_tracking.txt"
 
     # Always start fresh session with WiGLE header
     cat > "$CURRENT_SESSION" << EOF
@@ -193,6 +193,12 @@ start_scanning() {
     # Start LED daemon
     /usr/bin/wiglewrt-leds start </dev/null >/dev/null 2>&1 &
 
+    # Start sensor worker daemon (processes incoming sensor data)
+    if [ -x /usr/bin/sensor-worker ]; then
+        mkdir -p "$WIGLEWRT_TMP/sensor_queue"
+        /usr/bin/sensor-worker start </dev/null >/dev/null 2>&1 &
+    fi
+
     log info "WigleWRT started"
 
     # Write initial status
@@ -264,6 +270,11 @@ stop_scanning() {
 
     # Stop LED daemon
     /usr/bin/wiglewrt-leds stop 2>/dev/null
+
+    # Stop sensor worker daemon
+    if [ -x /usr/bin/sensor-worker ]; then
+        /usr/bin/sensor-worker stop 2>/dev/null
+    fi
 
     # Kill any remaining scan processes
     killall wiglewrt-scan 2>/dev/null

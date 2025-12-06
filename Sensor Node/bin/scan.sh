@@ -4,7 +4,15 @@
 # Usage: scan.sh <interface> <strategy> <dwell_ms>
 
 SCRIPT_DIR="$(dirname "$0")"
-. "$SCRIPT_DIR/../lib/common.sh"
+# Try multiple locations for common.sh
+if [ -f "$SCRIPT_DIR/../lib/common.sh" ]; then
+    . "$SCRIPT_DIR/../lib/common.sh"
+elif [ -f "/usr/share/wiglewrt/lib/common.sh" ]; then
+    . "/usr/share/wiglewrt/lib/common.sh"
+else
+    echo "ERROR: common.sh not found" >&2
+    exit 1
+fi
 
 IFACE="$1"
 STRATEGY="${2:-fixed}"
@@ -20,15 +28,26 @@ fi
 # Export dwell for strategies
 export DWELL_MS
 
-# Load strategy
-STRATEGY_FILE="$SCRIPT_DIR/../lib/strategies/${STRATEGY}.sh"
-if [ ! -f "$STRATEGY_FILE" ]; then
+# Load strategy - try multiple locations
+if [ -f "$SCRIPT_DIR/../lib/strategies/${STRATEGY}.sh" ]; then
+    STRATEGY_FILE="$SCRIPT_DIR/../lib/strategies/${STRATEGY}.sh"
+elif [ -f "/usr/share/wiglewrt/lib/strategies/${STRATEGY}.sh" ]; then
+    STRATEGY_FILE="/usr/share/wiglewrt/lib/strategies/${STRATEGY}.sh"
+else
     log error "Unknown strategy: $STRATEGY"
     exit 1
 fi
 . "$STRATEGY_FILE"
 
-PARSE_AWK="$SCRIPT_DIR/../lib/parse_scan.awk"
+# Find parse_scan.awk - try multiple locations
+if [ -f "$SCRIPT_DIR/../lib/parse_scan.awk" ]; then
+    PARSE_AWK="$SCRIPT_DIR/../lib/parse_scan.awk"
+elif [ -f "/usr/share/wiglewrt/lib/parse_scan.awk" ]; then
+    PARSE_AWK="/usr/share/wiglewrt/lib/parse_scan.awk"
+else
+    log error "parse_scan.awk not found"
+    exit 1
+fi
 LOCK_FILE="$WIGLEWRT_TMP/db.lock"
 
 log info "Starting scanner on $IFACE with strategy $(strategy_name)"
@@ -117,9 +136,15 @@ scan_loop() {
         strategy_scan_cycle "$IFACE" "$PARSE_AWK" | while IFS='	' read -r bssid ssid channel signal enc; do
             [ -z "$bssid" ] && continue
             update_network "$bssid" "$ssid" "$channel" "$signal" "$enc" "$lat" "$lon" "$alt" "$acc"
+
+            # Buffer for control node (if sensor mode enabled)
+            buffer_for_control "$bssid" "$ssid" "$channel" "$signal" "$enc"
         done
 
         log debug "Cycle $cycle complete on $IFACE"
+
+        # Trigger sensor report to control node (runs in background)
+        trigger_sensor_report
     done
 }
 

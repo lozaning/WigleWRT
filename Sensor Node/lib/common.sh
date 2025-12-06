@@ -14,6 +14,10 @@ STATUS_FILE="$WIGLEWRT_TMP/status.json"
 EVENTS_PIPE="$WIGLEWRT_TMP/events"
 LED_PIPE="$WIGLEWRT_TMP/led_cmd"
 
+# Sensor mode paths
+SENSOR_CONF="${SENSOR_CONF:-$WIGLEWRT_BASE/sensor.conf}"
+SENSOR_BUFFER="$WIGLEWRT_TMP/sensor_buffer.ndjson"
+
 # Log levels: 0=error, 1=warn, 2=info, 3=debug
 LOG_LEVEL="${LOG_LEVEL:-2}"
 
@@ -118,4 +122,66 @@ get_interface() {
 # Get all wireless phys
 get_phys() {
     ls /sys/class/ieee80211/ 2>/dev/null
+}
+
+# Buffer a network for reporting to control node (sensor mode)
+# Usage: buffer_for_control bssid ssid channel signal encryption
+buffer_for_control() {
+    local bssid="$1" ssid="$2" channel="$3" signal="$4" enc="$5"
+
+    # Skip if sensor mode not configured
+    [ ! -f "$SENSOR_CONF" ] && return 0
+
+    # Escape special chars in SSID for JSON
+    local safe_ssid=$(echo "$ssid" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
+
+    # Append as newline-delimited JSON (one object per line)
+    echo "{\"bssid\":\"$bssid\",\"ssid\":\"$safe_ssid\",\"channel\":\"$channel\",\"signal\":\"$signal\",\"encryption\":\"$enc\"}" >> "$SENSOR_BUFFER"
+
+    # Enforce buffer max size (drop oldest entries if exceeded)
+    if [ -f "$SENSOR_CONF" ]; then
+        . "$SENSOR_CONF"
+        BUFFER_MAX="${BUFFER_MAX:-500}"
+        local count=$(wc -l < "$SENSOR_BUFFER" 2>/dev/null | tr -d ' ')
+        if [ "$count" -gt "$BUFFER_MAX" ]; then
+            local excess=$((count - BUFFER_MAX))
+            tail -n +"$((excess + 1))" "$SENSOR_BUFFER" > "${SENSOR_BUFFER}.tmp" && \
+                mv "${SENSOR_BUFFER}.tmp" "$SENSOR_BUFFER"
+            log debug "Buffer overflow: dropped $excess oldest entries"
+        fi
+    fi
+}
+
+# Trigger sensor report (called after scan cycle)
+# Throttled to only send every REPORT_INTERVAL seconds (default 10)
+trigger_sensor_report() {
+    # Only if sensor mode is configured
+    [ ! -f "$SENSOR_CONF" ] && return 0
+    [ ! -s "$SENSOR_BUFFER" ] && return 0
+
+    # Load config for interval
+    . "$SENSOR_CONF" 2>/dev/null
+    local interval="${REPORT_INTERVAL:-10}"
+    local last_report_file="$WIGLEWRT_TMP/last_report"
+    local now=$(date +%s)
+
+    # Check if enough time has passed since last report
+    if [ -f "$last_report_file" ]; then
+        local last_report=$(cat "$last_report_file" 2>/dev/null)
+        local elapsed=$((now - last_report))
+        if [ "$elapsed" -lt "$interval" ]; then
+            # Not enough time passed, skip this report
+            return 0
+        fi
+    fi
+
+    # Update last report timestamp
+    echo "$now" > "$last_report_file"
+
+    # Run reporter in background to not block scanning
+    if [ -x "/usr/bin/sensor-report.sh" ]; then
+        /usr/bin/sensor-report.sh &
+    elif [ -x "$(dirname "$0")/sensor-report.sh" ]; then
+        "$(dirname "$0")/sensor-report.sh" &
+    fi
 }

@@ -1,0 +1,15 @@
+{
+  "wiglewrt": {
+    "description": "WigleWRT WiFi scanner",
+    "read": {
+      "ubus": {
+        "wiglewrt": ["status", "networks", "current_scan", "sessions_list", "gps_status", "export", "session_export", "get_config"]
+      }
+    },
+    "write": {
+      "ubus": {
+        "wiglewrt": ["start", "stop", "session_delete", "set_config"]
+      }
+    }
+  }
+}

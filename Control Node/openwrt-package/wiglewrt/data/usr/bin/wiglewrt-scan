@@ -81,6 +81,9 @@ log_sighting() {
     # Append to CSV (persistent) - WiGLE format
     echo "$bssid,$safe_ssid,$auth_mode,$ts,$channel,$signal,${lat:-0},${lon:-0},${alt:-0},0,WIFI" >> "$CURRENT_SESSION"
 
+    # Track source for UI display (separate from WiGLE CSV)
+    echo "$bssid|$ts|control" >> "$WIGLEWRT_TMP/source_tracking.txt"
+
     # Update counts
     TOTAL_SIGHTINGS=$((TOTAL_SIGHTINGS + 1))
 

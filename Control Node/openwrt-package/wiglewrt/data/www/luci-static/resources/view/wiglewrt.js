@@ -229,7 +229,19 @@ return view.extend({
         }
     },
 
+    // Get background color based on WiFi band (from channel number)
+    // Dark mode compatible colors
+    getBandColor: function(channel) {
+        var ch = parseInt(channel);
+        if (ch >= 1 && ch <= 14) return '#1a3a5c';       // 2.4 GHz - dark blue
+        if (ch >= 32 && ch <= 177) return '#1a4a2e';     // 5 GHz - dark green
+        if (ch >= 191) return '#3d1a4a';                  // 6 GHz - dark purple
+        return 'transparent';
+    },
+
     renderCurrentScanTable: function(networks) {
+        var self = this;
+
         if (!networks || networks.length === 0) {
             return E('p', { 'style': 'color: #666;' }, 'No networks seen yet. Start scanning to see live results.');
         }
@@ -241,18 +253,21 @@ return view.extend({
                 E('th', {}, 'SSID'),
                 E('th', {}, 'Channel'),
                 E('th', {}, 'Signal'),
-                E('th', {}, 'Encryption')
+                E('th', {}, 'Encryption'),
+                E('th', {}, 'Source')
             ])
         ];
 
         networks.forEach(function(net) {
-            rows.push(E('tr', {}, [
+            var bandColor = self.getBandColor(net.channel);
+            rows.push(E('tr', { 'style': 'background-color: ' + bandColor + ';' }, [
                 E('td', { 'style': 'font-family: monospace; font-size: 0.9em;' }, net.time || ''),
                 E('td', { 'style': 'font-family: monospace;' }, net.bssid),
                 E('td', {}, net.ssid || '<hidden>'),
                 E('td', {}, String(net.channel)),
                 E('td', {}, net.signal + ' dBm'),
-                E('td', {}, net.encryption)
+                E('td', {}, net.encryption),
+                E('td', {}, net.source || 'control')
             ]));
         });
 
