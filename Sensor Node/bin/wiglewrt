@@ -38,9 +38,9 @@ EOF
 
 # Find wireless interfaces
 find_interfaces() {
-    for phy in $(get_phys); do
-        iface=$(get_interface "$phy")
-        [ -n "$iface" ] && echo "$iface"
+    # Use dedicated scan interfaces
+    for iface in scan0 scan1 scan2; do
+        ip link show "$iface" >/dev/null 2>&1 && echo "$iface"
     done
 }
 

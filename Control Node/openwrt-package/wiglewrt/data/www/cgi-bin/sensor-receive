@@ -1,31 +1,22 @@
 #!/bin/sh
-# sensor-receive - Fast CGI endpoint that queues data for background processing
-# Immediately writes to queue and returns - no blocking JSON parsing
-
+# sensor-receive - Fixed for uhttpd stdin handling
 QUEUE_DIR="/tmp/wiglewrt/sensor_queue"
 mkdir -p "$QUEUE_DIR"
 
-# Generate unique filename with timestamp
-QUEUE_FILE="$QUEUE_DIR/$(date +%s%N)_$$.json"
+QUEUE_FILE="$QUEUE_DIR/$(date +%s)_$$.json"
 
-# Read entire POST body (multiple lines) directly to queue file
-# Use CONTENT_LENGTH if available, otherwise read until EOF
-if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
-    head -c "$CONTENT_LENGTH" > "$QUEUE_FILE"
-else
-    cat > "$QUEUE_FILE"
-fi
+# uhttpd might buffer stdin differently - use cat to file then check
+cat > "$QUEUE_FILE"
 
 # Validate we have data
 if [ ! -s "$QUEUE_FILE" ]; then
     rm -f "$QUEUE_FILE"
     echo "Content-Type: application/json"
     echo ""
-    echo '{"success":false,"error":"no data"}'
+    echo "{\"success\":false,\"error\":\"no data\"}"
     exit 0
 fi
 
-# Return success immediately
 echo "Content-Type: application/json"
 echo ""
-echo '{"success":true,"queued":true}'
+echo "{\"success\":true,\"queued\":true}"
