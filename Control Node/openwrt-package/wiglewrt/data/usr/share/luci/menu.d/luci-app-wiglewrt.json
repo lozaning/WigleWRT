@@ -1,0 +1,14 @@
+{
+	"admin/services/wiglewrt": {
+		"title": "WigleWRT",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "wiglewrt"
+		},
+		"depends": {
+			"acl": ["luci-app-wiglewrt"],
+			"uci": {"wiglewrt": true}
+		}
+	}
+}

@@ -1,0 +1,229 @@
+#!/bin/sh
+# gps.sh - GPS daemon for WigleWRT v2
+# Reads GPS data and writes to gps.current file every second
+# Non-blocking for other processes to read
+
+SCRIPT_DIR="/usr/share/wiglewrt"
+. "/usr/share/wiglewrt/lib/common.sh"
+
+# GPS device paths to try
+GPS_DEVICES="/dev/ttyACM0 /dev/ttyACM1 /dev/ttyUSB0 /dev/gps0"
+
+GPS_DEVICE=""
+GPS_PID=""
+
+# Parse NMEA RMC sentence for lat/lon
+# Format: $GNRMC,HHMMSS.ss,A,DDMM.MMM,N,DDDMM.MMM,W,...
+parse_rmc() {
+    local line="$1"
+    echo "$line" | awk -F',' '
+    {
+        if ($3 != "A") { print ""; exit }  # No fix
+
+        # Latitude
+        lat_dm = $4
+        lat_deg = int(lat_dm / 100)
+        lat_min = lat_dm - (lat_deg * 100)
+        lat = lat_deg + (lat_min / 60)
+        if ($5 == "S") lat = -lat
+
+        # Longitude
+        lon_dm = $6
+        lon_deg = int(lon_dm / 100)
+        lon_min = lon_dm - (lon_deg * 100)
+        lon = lon_deg + (lon_min / 60)
+        if ($7 == "W") lon = -lon
+
+        printf "%.6f\t%.6f", lat, lon
+    }'
+}
+
+# Parse NMEA GGA sentence for altitude
+# Format: $GNGGA,HHMMSS.ss,DDMM.MMM,N,DDDMM.MMM,W,1,08,1.2,123.4,M,...
+parse_gga() {
+    local line="$1"
+    echo "$line" | awk -F',' '
+    {
+        if ($7 < 1) { print "0\t0\t0"; exit }  # No fix
+
+        sats = $8
+        hdop = $9
+        alt = $10
+
+        printf "%s\t%s\t%s", alt, hdop, sats
+    }'
+}
+
+# Find working GPS device
+find_gps() {
+    for dev in $GPS_DEVICES; do
+        if [ -c "$dev" ]; then
+            log info "Found GPS device: $dev"
+            GPS_DEVICE="$dev"
+            return 0
+        fi
+    done
+
+    # Try gpsd
+    if command -v gpspipe >/dev/null 2>&1; then
+        log info "Using gpsd"
+        GPS_DEVICE="gpsd"
+        return 0
+    fi
+
+    log error "No GPS device found"
+    return 1
+}
+
+# Read GPS via direct device access
+read_gps_direct() {
+    local tmp_file="/tmp/gps_nmea.$$"
+
+    # Start reading in background, kill after 1 second
+    cat "$GPS_DEVICE" > "$tmp_file" 2>/dev/null &
+    local cat_pid=$!
+    sleep 1
+    kill $cat_pid 2>/dev/null
+    wait $cat_pid 2>/dev/null
+
+    local nmea_data=$(cat "$tmp_file" 2>/dev/null)
+    rm -f "$tmp_file"
+
+    # Parse RMC for position
+    local rmc_line=$(echo "$nmea_data" | grep -E '^\$G[NP]RMC' | head -1)
+    local gga_line=$(echo "$nmea_data" | grep -E '^\$G[NP]GGA' | head -1)
+
+    if [ -z "$rmc_line" ]; then
+        echo ""
+        return 1
+    fi
+
+    local pos=$(parse_rmc "$rmc_line")
+    if [ -z "$pos" ]; then
+        echo ""
+        return 1
+    fi
+
+    local extra="0	0	0"
+    if [ -n "$gga_line" ]; then
+        extra=$(parse_gga "$gga_line")
+    fi
+
+    echo "${pos}	${extra}	$(now)"
+}
+
+# Read GPS via gpsd
+read_gps_gpsd() {
+    local json=$(gpspipe -w -n 5 2>/dev/null | grep '"class":"TPV"' | head -1)
+
+    if [ -z "$json" ]; then
+        echo ""
+        return 1
+    fi
+
+    echo "$json" | awk '
+    {
+        if (match($0, /"lat":([0-9.-]+)/, a)) lat = a[1]
+        if (match($0, /"lon":([0-9.-]+)/, b)) lon = b[1]
+        if (match($0, /"alt":([0-9.-]+)/, c)) alt = c[1]; else alt = 0
+        if (match($0, /"mode":([0-9]+)/, d)) mode = d[1]
+
+        if (mode < 2 || lat == "" || lon == "") { print ""; exit }
+
+        printf "%.6f\t%.6f\t%.1f\t0\t0\t%d\n", lat, lon, alt, systime()
+    }'
+}
+
+# Main GPS loop
+gps_loop() {
+    log info "Starting GPS daemon"
+
+    while true; do
+        local gps_data=""
+
+        if [ "$GPS_DEVICE" = "gpsd" ]; then
+            gps_data=$(read_gps_gpsd)
+        else
+            gps_data=$(read_gps_direct)
+        fi
+
+        if [ -n "$gps_data" ]; then
+            echo "$gps_data" > "$GPS_FILE"
+            log debug "GPS: $gps_data"
+        else
+            # Clear old data if GPS lost
+            echo "" > "$GPS_FILE"
+            log debug "GPS: no fix"
+        fi
+
+        sleep 1
+    done
+}
+
+# Main
+case "$1" in
+    start)
+        LOCKDIR="$WIGLEWRT_TMP/gps.lock"
+
+        # Try to acquire lock (atomic operation)
+        if ! acquire_lock "$LOCKDIR"; then
+            # Lock exists - check if GPS is running by PID
+            if is_running "$WIGLEWRT_TMP/gps.pid"; then
+                log warn "GPS daemon already running"
+                exit 0
+            fi
+            # Stale lock, remove and retry
+            release_lock "$LOCKDIR"
+            if ! acquire_lock "$LOCKDIR"; then
+                log warn "GPS daemon already starting"
+                exit 0
+            fi
+        fi
+
+        # Double-check GPS not running by PID (catches race with stop/start)
+        if is_running "$WIGLEWRT_TMP/gps.pid"; then
+            log warn "GPS daemon already running"
+            release_lock "$LOCKDIR"
+            exit 0
+        fi
+
+        # We have the lock - find GPS and write PID atomically
+        if ! find_gps; then
+            release_lock "$LOCKDIR"
+            exit 1
+        fi
+        write_pid_atomic "$WIGLEWRT_TMP/gps.pid"
+        release_lock "$LOCKDIR"  # Release lock after PID written
+
+        gps_loop
+        ;;
+    stop)
+        # Kill GPS daemon by PID file and wait for it to die
+        if [ -f "$WIGLEWRT_TMP/gps.pid" ]; then
+            local pid=$(cat "$WIGLEWRT_TMP/gps.pid" 2>/dev/null)
+            if [ -n "$pid" ]; then
+                kill "$pid" 2>/dev/null
+                # Wait for process to actually die (max 5 seconds)
+                for i in 1 2 3 4 5; do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 1
+                done
+            fi
+            rm -f "$WIGLEWRT_TMP/gps.pid"
+        fi
+        # Clean up lock if it exists
+        rm -rf "$WIGLEWRT_TMP/gps.lock"
+        ;;
+    status)
+        if is_running "$WIGLEWRT_TMP/gps.pid"; then
+            echo "GPS daemon running"
+            cat "$GPS_FILE" 2>/dev/null
+        else
+            echo "GPS daemon not running"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac

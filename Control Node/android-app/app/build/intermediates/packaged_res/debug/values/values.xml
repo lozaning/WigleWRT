@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="dark_bg">#FF121212</color>
+    <color name="dark_card">#FF2D2D2D</color>
+    <color name="dark_surface">#FF1E1E1E</color>
+    <color name="gps_fix">#FF4CAF50</color>
+    <color name="gps_no_fix">#FFFFC107</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="status_running">#FF4CAF50</color>
+    <color name="status_stopped">#FFF44336</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+    <color name="white">#FFFFFFFF</color>
+    <string name="app_name">WigleWRT Monitor</string>
+    <string name="disconnect_button">Disconnect</string>
+    <string name="gps_status">GPS Status</string>
+    <string name="networks">Networks</string>
+    <string name="scan_button">Scan for Device</string>
+    <string name="scanner_status">Scanner Status</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_connecting">Connecting...</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_scanning">Scanning...</string>
+    <style name="Theme.WigleWRT" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/purple_500</item>
+        <item name="colorPrimaryVariant">@color/purple_700</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/teal_200</item>
+        <item name="colorSecondaryVariant">@color/teal_700</item>
+        <item name="colorOnSecondary">@color/black</item>
+        <item name="android:statusBarColor">@color/dark_bg</item>
+        <item name="android:windowBackground">@color/dark_bg</item>
+    </style>
+</resources>

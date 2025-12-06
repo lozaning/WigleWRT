@@ -1,0 +1,27 @@
+#!/bin/sh
+[ "${IPKG_NO_SCRIPT}" = "1" ] && exit 0
+[ -x "${IPKG_INSTROOT}/lib/functions.sh" ] && . "${IPKG_INSTROOT}/lib/functions.sh"
+
+# Create data directories
+mkdir -p /etc/wiglewrt/sessions
+mkdir -p /etc/wiglewrt/exports
+mkdir -p /tmp/wiglewrt
+
+# Enable and start services
+if [ -z "${IPKG_INSTROOT}" ]; then
+    # Reload rpcd to pick up new ubus methods
+    /etc/init.d/rpcd reload 2>/dev/null
+
+    # Enable services
+    /etc/init.d/wiglewrt enable 2>/dev/null
+    /etc/init.d/wiglewrt-ble enable 2>/dev/null
+
+    # Start BLE service (always on)
+    /etc/init.d/wiglewrt-ble start 2>/dev/null
+
+    echo "WigleWRT installed successfully!"
+    echo "Access the web interface at: Services -> WigleWRT"
+    echo "Or start scanning via CLI: wiglewrt start"
+fi
+
+exit 0

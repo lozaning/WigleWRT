@@ -1,0 +1,210 @@
+#!/bin/sh
+# wiglewrt - Main controller for WigleWRT v2
+# Manages GPS, scanner, and database processes
+
+# Use absolute path for device deployment
+. /usr/share/wiglewrt/lib/common.sh
+
+VERSION="2.5.0"
+
+# Default configuration - fixed_500 is the best performing strategy
+STRATEGY="${STRATEGY:-fixed}"
+DWELL_MS="${DWELL_MS:-500}"
+
+usage() {
+    cat << EOF
+WigleWRT v$VERSION - WiFi Scanner
+
+Usage: $0 <command> [options]
+
+Commands:
+    start [dwell_ms]     Start scanning (default: 500ms dwell)
+    stop                 Stop scanning
+    status               Show status
+    restart [dwell_ms]   Restart scanning
+
+Dwell times (tested performance):
+    500     Best balance - 82 networks/8min (default)
+    1000    Slower scan - 66 networks/8min
+    100     Faster scan - 64 networks/8min
+
+Examples:
+    $0 start                     # Start with default (500ms dwell)
+    $0 start 100                 # Start with 100ms dwell
+    $0 start 1000                # Start with 1000ms dwell
+    $0 status                    # Show current status
+EOF
+}
+
+# Find wireless interfaces
+find_interfaces() {
+    for phy in $(get_phys); do
+        iface=$(get_interface "$phy")
+        [ -n "$iface" ] && echo "$iface"
+    done
+}
+
+# Start all services
+start_scanning() {
+    local dwell="${1:-$DWELL_MS}"
+
+    # Check if already running
+    if is_running "$WIGLEWRT_TMP/wiglewrt.pid"; then
+        log error "WigleWRT already running"
+        exit 1
+    fi
+
+    log info "Starting WigleWRT with ${dwell}ms dwell time"
+
+    # Initialize runtime
+    init_runtime
+
+    # Save dwell time for status display
+    echo "fixed_${dwell}" > /tmp/wiglewrt_strategy
+
+    # Start GPS daemon
+    log info "Starting GPS daemon..."
+    /usr/bin/wiglewrt-gps start </dev/null >/dev/null 2>&1 &
+    GPS_PID=$!
+    sleep 1
+
+    # Wait for GPS file to be created
+    sleep 2
+
+    # Clear current scan log for new session
+    > /tmp/wiglewrt/current_scan.log
+
+    # Find and start scanners for each interface
+    local ifaces=$(find_interfaces)
+    local scanner_pids=""
+
+    for iface in $ifaces; do
+        log info "Starting scanner on $iface..."
+        /usr/bin/wiglewrt-scan "$iface" "fixed" "$dwell" run </dev/null >/dev/null 2>&1 &
+        local pid=$!
+        echo "$pid" > "/tmp/wiglewrt/scan_${iface}.pid"
+        scanner_pids="$scanner_pids $pid"
+    done
+
+    # Save PIDs
+    echo "$GPS_PID $scanner_pids" > "$WIGLEWRT_TMP/pids"
+    write_pid "$WIGLEWRT_TMP/wiglewrt.pid"
+
+    # Start LED daemon
+    /usr/bin/wiglewrt-leds start </dev/null >/dev/null 2>&1 &
+
+    log info "WigleWRT started"
+
+    # Write initial status
+    write_status "true" "0" "0/s" "fixed_${dwell}"
+}
+
+# Stop all services
+stop_scanning() {
+    if [ ! -f "$WIGLEWRT_TMP/pids" ]; then
+        log warn "WigleWRT not running"
+        return
+    fi
+
+    log info "Stopping WigleWRT..."
+
+    # Kill all child processes
+    for pid in $(cat "$WIGLEWRT_TMP/pids" 2>/dev/null); do
+        kill "$pid" 2>/dev/null
+    done
+
+    # Kill scanner processes by pid files
+    for pidfile in /tmp/wiglewrt/scan_*.pid; do
+        if [ -f "$pidfile" ]; then
+            local pid=$(cat "$pidfile" 2>/dev/null)
+            [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            rm -f "$pidfile"
+        fi
+    done
+
+    # Stop GPS daemon
+    /usr/bin/wiglewrt-gps stop 2>/dev/null
+
+    # Stop LED daemon
+    /usr/bin/wiglewrt-leds stop 2>/dev/null
+
+    # Kill any remaining scan processes
+    killall wiglewrt-scan 2>/dev/null
+    killall -9 iw 2>/dev/null
+
+    # Cleanup
+    rm -f "$WIGLEWRT_TMP/pids" "$WIGLEWRT_TMP/wiglewrt.pid" "$WIGLEWRT_TMP/db.lock"
+
+    write_status "false" "0" "0/s" ""
+
+    log info "WigleWRT stopped"
+}
+
+# Show status
+show_status() {
+    if is_running "$WIGLEWRT_TMP/wiglewrt.pid"; then
+        echo "WigleWRT: RUNNING"
+        echo "Strategy: $(cat /tmp/wiglewrt_strategy 2>/dev/null || echo unknown)"
+
+        # Count networks
+        if [ -f "$NETWORKS_FILE" ]; then
+            local count=$(wc -l < "$NETWORKS_FILE" | tr -d ' ')
+            count=$((count - 1))  # Subtract header
+            echo "Networks: $count"
+        fi
+
+        # GPS status
+        local gps=$(cat "$GPS_FILE" 2>/dev/null)
+        if [ -n "$gps" ]; then
+            echo "GPS: $(echo "$gps" | cut -f1),$(echo "$gps" | cut -f2)"
+        else
+            echo "GPS: No fix"
+        fi
+
+        # Show running processes
+        echo "Processes:"
+        for pid in $(cat "$WIGLEWRT_TMP/pids" 2>/dev/null); do
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "  $pid: running"
+            else
+                echo "  $pid: stopped"
+            fi
+        done
+    else
+        echo "WigleWRT: STOPPED"
+        if [ -f "$NETWORKS_FILE" ]; then
+            local count=$(wc -l < "$NETWORKS_FILE" | tr -d ' ')
+            count=$((count - 1))
+            echo "Networks in database: $count"
+        fi
+    fi
+}
+
+# Main
+case "$1" in
+    start)
+        start_scanning "$2"
+        ;;
+    stop)
+        stop_scanning
+        ;;
+    restart)
+        stop_scanning
+        sleep 2
+        start_scanning "$2"
+        ;;
+    status)
+        show_status
+        ;;
+    --version|-v)
+        echo "WigleWRT v$VERSION"
+        ;;
+    --help|-h|"")
+        usage
+        ;;
+    *)
+        echo "Unknown command: $1"
+        usage
+        exit 1
+        ;;
+esac

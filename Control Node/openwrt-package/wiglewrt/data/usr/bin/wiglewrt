@@ -1,0 +1,355 @@
+#!/bin/sh
+# wiglewrt - Main controller for WigleWRT v2
+# Manages GPS, scanner, and session processes
+
+# Use absolute path for device deployment
+. /usr/share/wiglewrt/lib/common.sh
+
+VERSION="2.9.1"
+
+# Default configuration
+STRATEGY="${STRATEGY:-fixed}"
+DWELL_MS="${DWELL_MS:-500}"
+CHANNEL_MODE="${CHANNEL_MODE:-common}"
+CHANNEL_OFFSET="${CHANNEL_OFFSET:-1}"
+
+# Load UCI config if available
+load_uci_config() {
+    if command -v uci >/dev/null 2>&1; then
+        local val
+        val=$(uci -q get wiglewrt.settings.hop_interval)
+        [ -n "$val" ] && DWELL_MS="$val"
+        val=$(uci -q get wiglewrt.settings.channel_mode)
+        [ -n "$val" ] && CHANNEL_MODE="$val"
+        val=$(uci -q get wiglewrt.settings.channel_offset)
+        [ -n "$val" ] && CHANNEL_OFFSET="$val"
+        log info "Loaded config: mode=$CHANNEL_MODE offset=$CHANNEL_OFFSET dwell=$DWELL_MS"
+    fi
+}
+
+usage() {
+    cat << EOF
+WigleWRT v$VERSION - WiFi Scanner
+
+Usage: $0 <command> [options]
+
+Commands:
+    start [dwell_ms]     Start scanning (default: ${DWELL_MS}ms dwell)
+    stop                 Stop scanning
+    status               Show status
+    restart [dwell_ms]   Restart scanning
+
+Channel Modes (set in /etc/config/wiglewrt):
+    common    Scan only channels 1,6,11 + common 5GHz (faster)
+    all       Scan all channels including DFS (thorough)
+
+Channel Offset:
+    When enabled, the dual-band radio uses offset channel order
+    to avoid scanning the same channel as dedicated radios.
+
+Examples:
+    $0 start                     # Start with config settings
+    $0 start 100                 # Start with 100ms dwell
+    $0 status                    # Show current status
+EOF
+}
+
+# Get radio band from UCI config
+get_radio_band() {
+    local radio_num="$1"
+    if command -v uci >/dev/null 2>&1; then
+        uci -q get wiglewrt.radio${radio_num}.band
+    fi
+}
+
+# Find wireless interfaces with their radio info
+# Output: "iface:radio_num:band" for each interface
+find_interfaces_with_info() {
+    local radio_num=0
+    for phy in $(get_phys); do
+        iface=$(get_interface "$phy")
+        if [ -n "$iface" ]; then
+            local band=$(get_radio_band "$radio_num")
+            [ -z "$band" ] && band="auto"
+            echo "${iface}:${radio_num}:${band}"
+        fi
+        radio_num=$((radio_num + 1))
+    done
+}
+
+# Start a new session
+start_session() {
+    local session_id=$(date +%Y%m%d_%H%M%S)
+
+    mkdir -p "$SESSION_DIR"
+
+    # Archive any existing current.csv from prior session (e.g., power loss)
+    if [ -f "$CURRENT_SESSION" ]; then
+        local archive_id=$(date +%Y%m%d_%H%M%S)
+        mv "$CURRENT_SESSION" "$SESSION_DIR/${archive_id}.csv"
+        log info "Archived previous session: ${archive_id}.csv"
+    fi
+
+    # Clear seen BSSIDs file
+    rm -f "$WIGLEWRT_TMP/seen_bssids.txt"
+
+    # Always start fresh session with WiGLE header
+    cat > "$CURRENT_SESSION" << EOF
+WigleWifi-1.4,appRelease=WigleWRT,model=OpenWRT,release=v${VERSION},device=router,display=none,board=mediatek,brand=unknown
+MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type
+EOF
+
+    # Initialize session state
+    echo "{\"unique_networks\":0,\"total_sightings\":0}" > "$SESSION_STATE"
+
+    log info "Started new session: $session_id"
+}
+
+# Start all services
+start_scanning() {
+    local dwell="${1:-$DWELL_MS}"
+
+    # Load config
+    load_uci_config
+    [ -n "$1" ] && dwell="$1"  # CLI arg overrides config
+
+    # Global lock to prevent concurrent starts
+    GLOBAL_LOCK="$WIGLEWRT_TMP/start.lock"
+    mkdir -p "$WIGLEWRT_TMP"
+    if ! acquire_lock "$GLOBAL_LOCK"; then
+        log error "Another start operation in progress"
+        exit 1
+    fi
+    # Ensure lock is released on exit
+    trap "release_lock '$GLOBAL_LOCK' 2>/dev/null" EXIT
+
+    # Check if already running
+    if is_running "$WIGLEWRT_TMP/wiglewrt.pid"; then
+        log error "WigleWRT already running"
+        release_lock "$GLOBAL_LOCK"
+        exit 1
+    fi
+
+    # Clean up stale PID files before starting
+    cleanup_stale_pids "$WIGLEWRT_TMP"
+
+    log info "Starting WigleWRT: dwell=${dwell}ms mode=${CHANNEL_MODE} offset=${CHANNEL_OFFSET}"
+
+    # Initialize runtime
+    init_runtime
+
+    # Save strategy info for status display
+    local offset_str=""
+    [ "$CHANNEL_OFFSET" = "1" ] && offset_str="_offset"
+    echo "fixed_${dwell}_${CHANNEL_MODE}${offset_str}" > /tmp/wiglewrt_strategy
+
+    # Start GPS daemon
+    log info "Starting GPS daemon..."
+    /usr/bin/wiglewrt-gps start </dev/null >/dev/null 2>&1 &
+
+    # Wait for GPS daemon to actually start (max 5 seconds)
+    for i in 1 2 3 4 5; do
+        if is_running "$WIGLEWRT_TMP/gps.pid"; then
+            log info "GPS daemon started"
+            break
+        fi
+        sleep 1
+    done
+
+    if ! is_running "$WIGLEWRT_TMP/gps.pid"; then
+        log warn "GPS daemon may not have started properly"
+    fi
+
+    # Start a new session (archives any prior session)
+    start_session
+
+    # Find and start scanners for each interface
+    local scanner_pids=""
+
+    for iface_info in $(find_interfaces_with_info); do
+        local iface=$(echo "$iface_info" | cut -d: -f1)
+        local radio_num=$(echo "$iface_info" | cut -d: -f2)
+        local band=$(echo "$iface_info" | cut -d: -f3)
+
+        log info "Starting scanner on $iface (radio$radio_num, band=$band)..."
+
+        # Export environment for the scanner
+        DWELL_MS="$dwell" \
+        CHANNEL_MODE="$CHANNEL_MODE" \
+        CHANNEL_OFFSET="$CHANNEL_OFFSET" \
+        RADIO_INDEX="$radio_num" \
+        RADIO_BAND="$band" \
+        /usr/bin/wiglewrt-scan "$iface" "fixed" "$dwell" run </dev/null >/dev/null 2>&1 &
+
+        local pid=$!
+        echo "$pid" > "/tmp/wiglewrt/scan_${iface}.pid"
+        scanner_pids="$scanner_pids $pid"
+    done
+
+    # Save PIDs
+    echo "$GPS_PID $scanner_pids" > "$WIGLEWRT_TMP/pids"
+    write_pid "$WIGLEWRT_TMP/wiglewrt.pid"
+
+    # Start LED daemon
+    /usr/bin/wiglewrt-leds start </dev/null >/dev/null 2>&1 &
+
+    log info "WigleWRT started"
+
+    # Write initial status
+    write_status "true" "0" "0/s" "fixed_${dwell}_${CHANNEL_MODE}"
+
+    # Wait for child processes - keeps main script alive for procd
+    # This prevents procd from restarting and creating duplicate children
+    wait
+}
+
+# Archive current session to timestamped file
+archive_session() {
+    if [ -f "$CURRENT_SESSION" ]; then
+        # Check if session has any data (more than 2 lines = header + data)
+        local line_count=$(wc -l < "$CURRENT_SESSION" | tr -d ' ')
+        if [ "$line_count" -gt 2 ]; then
+            local session_id=$(date +%Y%m%d_%H%M%S)
+            local csv_file="$SESSION_DIR/${session_id}.csv"
+            local meta_file="$SESSION_DIR/${session_id}.meta"
+
+            mv "$CURRENT_SESSION" "$csv_file"
+
+            # Calculate counts once and save to metadata file
+            local total=$((line_count - 2))  # Subtract 2 header lines
+            local unique=$(tail -n +3 "$csv_file" | cut -d',' -f1 | sort -u | wc -l | tr -d ' ')
+            echo "{\"networks\":$total,\"unique\":$unique}" > "$meta_file"
+
+            log info "Archived session: ${session_id}.csv ($total networks, $unique unique)"
+            sync
+        else
+            # Empty session, just remove it
+            rm -f "$CURRENT_SESSION"
+            log info "Removed empty session"
+        fi
+    fi
+
+    # Clear session state
+    rm -f "$SESSION_STATE" "$WIGLEWRT_TMP/seen_bssids.txt"
+}
+
+# Stop all services
+stop_scanning() {
+    if [ ! -f "$WIGLEWRT_TMP/pids" ]; then
+        log warn "WigleWRT not running"
+        return
+    fi
+
+    log info "Stopping WigleWRT..."
+
+    # Archive the current session before stopping
+    archive_session
+
+    # Kill all child processes by PID file
+    for pid in $(cat "$WIGLEWRT_TMP/pids" 2>/dev/null); do
+        kill "$pid" 2>/dev/null
+    done
+
+    # Kill scanner processes by pid files
+    for pidfile in /tmp/wiglewrt/scan_*.pid; do
+        if [ -f "$pidfile" ]; then
+            local pid=$(cat "$pidfile" 2>/dev/null)
+            [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            rm -f "$pidfile"
+        fi
+    done
+
+    # Stop GPS daemon
+    /usr/bin/wiglewrt-gps stop 2>/dev/null
+
+    # Stop LED daemon
+    /usr/bin/wiglewrt-leds stop 2>/dev/null
+
+    # Kill any remaining scan processes
+    killall wiglewrt-scan 2>/dev/null
+    killall -9 iw 2>/dev/null
+
+    # Cleanup PID files and locks
+    rm -f "$WIGLEWRT_TMP/pids" "$WIGLEWRT_TMP/wiglewrt.pid"
+    rm -rf "$WIGLEWRT_TMP/start.lock" "$WIGLEWRT_TMP/gps.lock"
+
+    write_status "false" "0" "0/s" ""
+
+    log info "WigleWRT stopped"
+}
+
+# Show status
+show_status() {
+    # Load config for display
+    load_uci_config
+
+    if is_running "$WIGLEWRT_TMP/wiglewrt.pid"; then
+        echo "WigleWRT: RUNNING"
+        echo "Strategy: $(cat /tmp/wiglewrt_strategy 2>/dev/null || echo unknown)"
+        echo "Channel Mode: $CHANNEL_MODE"
+        echo "Channel Offset: $CHANNEL_OFFSET"
+
+        # Read session state for counts
+        if [ -f "$SESSION_STATE" ]; then
+            local unique=$(grep -o '"unique_networks":[0-9]*' "$SESSION_STATE" 2>/dev/null | cut -d: -f2)
+            local sightings=$(grep -o '"total_sightings":[0-9]*' "$SESSION_STATE" 2>/dev/null | cut -d: -f2)
+            echo "Unique Networks: ${unique:-0}"
+            echo "Total Sightings: ${sightings:-0}"
+        fi
+
+        # GPS status
+        local gps=$(cat "$GPS_FILE" 2>/dev/null)
+        if [ -n "$gps" ]; then
+            echo "GPS: $(echo "$gps" | cut -f1),$(echo "$gps" | cut -f2)"
+        else
+            echo "GPS: No fix"
+        fi
+
+        # Show running processes
+        echo "Processes:"
+        for pid in $(cat "$WIGLEWRT_TMP/pids" 2>/dev/null); do
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "  $pid: running"
+            else
+                echo "  $pid: stopped"
+            fi
+        done
+    else
+        echo "WigleWRT: STOPPED"
+        echo "Channel Mode: $CHANNEL_MODE"
+        echo "Channel Offset: $CHANNEL_OFFSET"
+
+        # Show archived sessions count
+        local session_count=$(ls -1 "$SESSION_DIR"/*.csv 2>/dev/null | wc -l)
+        echo "Archived sessions: ${session_count:-0}"
+    fi
+}
+
+# Main
+case "$1" in
+    start)
+        start_scanning "$2"
+        ;;
+    stop)
+        stop_scanning
+        ;;
+    restart)
+        stop_scanning
+        sleep 2
+        start_scanning "$2"
+        ;;
+    status)
+        show_status
+        ;;
+    --version|-v)
+        echo "WigleWRT v$VERSION"
+        ;;
+    --help|-h|"")
+        usage
+        ;;
+    *)
+        echo "Unknown command: $1"
+        usage
+        exit 1
+        ;;
+esac

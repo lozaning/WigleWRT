@@ -1,9 +1,0 @@
-# Template for local.properties
-# Copy this file to local.properties and update the SDK path
-
-# Example paths:
-# Windows: sdk.dir=C:\\Users\\YourUser\\AppData\\Local\\Android\\Sdk
-# macOS: sdk.dir=/Users/YourUser/Library/Android/sdk
-# Linux: sdk.dir=/home/YourUser/Android/Sdk
-
-sdk.dir=/path/to/your/android/sdk

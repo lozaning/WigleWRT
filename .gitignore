@@ -1,6 +1,0 @@
-
-# Android build artifacts
-bluetooth-monitor/android-app/.gradle/
-bluetooth-monitor/android-app/build/
-bluetooth-monitor/android-app/local.properties
-bluetooth-monitor/android-simple/build/

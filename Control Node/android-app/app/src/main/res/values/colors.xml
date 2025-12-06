@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="dark_bg">#FF121212</color>
+    <color name="dark_surface">#FF1E1E1E</color>
+    <color name="dark_card">#FF2D2D2D</color>
+    <color name="status_running">#FF4CAF50</color>
+    <color name="status_stopped">#FFF44336</color>
+    <color name="gps_fix">#FF4CAF50</color>
+    <color name="gps_no_fix">#FFFFC107</color>
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+</resources>

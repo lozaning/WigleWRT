@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="8dp"
+    android:background="@color/dark_surface">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/networkSsid"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="SSID"
+            android:textSize="14sp"
+            android:textColor="@color/text_primary"
+            android:ellipsize="end"
+            android:maxLines="1" />
+
+        <TextView
+            android:id="@+id/networkSignal"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-70 dBm"
+            android:textSize="12sp"
+            android:textColor="@color/teal_200" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingTop="2dp">
+
+        <TextView
+            android:id="@+id/networkBssid"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="00:00:00:00:00:00"
+            android:textSize="10sp"
+            android:textColor="@color/text_secondary"
+            android:fontFamily="monospace" />
+
+        <TextView
+            android:id="@+id/networkChannel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Ch 1"
+            android:textSize="10sp"
+            android:textColor="@color/text_secondary" />
+
+    </LinearLayout>
+
+</LinearLayout>
