@@ -1,0 +1,68 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+# Auto-detect available phys and create scan interfaces
+start() {
+    echo "Creating WigleWRT scan interfaces..."
+
+    # Wait for wifi to be ready
+    sleep 3
+
+    # Find all real phys (exclude mld-* virtual phys)
+    local idx=0
+    for phy in /sys/class/ieee80211/phy*; do
+        [ ! -d "$phy" ] && continue
+
+        local phy_name=$(basename "$phy")
+
+        # Skip mld-* phys (virtual/aggregate interfaces)
+        case "$phy_name" in
+            mld-*) continue ;;
+        esac
+
+        local iface="scan${idx}"
+
+        # Check if scan interface already exists
+        if ip link show "$iface" >/dev/null 2>&1; then
+            echo "  $iface already exists on $phy_name"
+        else
+            # Create managed interface for scanning
+            if iw phy "$phy_name" interface add "$iface" type managed 2>/dev/null; then
+                echo "  Created $iface on $phy_name"
+            else
+                echo "  Failed to create $iface on $phy_name"
+                continue
+            fi
+        fi
+
+        # Bring interface up
+        ip link set "$iface" up 2>/dev/null
+
+        idx=$((idx + 1))
+    done
+
+    if [ $idx -eq 0 ]; then
+        echo "Warning: No scan interfaces created"
+    else
+        echo "WigleWRT scan interfaces ready ($idx interfaces)"
+    fi
+}
+
+stop() {
+    echo "Removing WigleWRT scan interfaces..."
+
+    # Remove all scan interfaces
+    for iface in scan0 scan1 scan2 scan3 scan4 scan5; do
+        if ip link show "$iface" >/dev/null 2>&1; then
+            iw dev "$iface" del 2>/dev/null && echo "  Removed $iface"
+        fi
+    done
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}

@@ -239,39 +239,88 @@ return view.extend({
         return 'transparent';
     },
 
+    // Get signal strength color (green/amber/red)
+    getSignalColor: function(signal) {
+        var sig = parseInt(signal);
+        if (sig >= -50) return '#4ade80';  // Strong - green
+        if (sig >= -70) return '#fbbf24';  // Medium - amber
+        return '#f87171';                   // Weak - red
+    },
+
+    // Format coordinates to 6 decimal places
+    formatCoord: function(coord) {
+        if (!coord || coord === '' || coord === '0') return '-';
+        var num = parseFloat(coord);
+        return isNaN(num) ? '-' : num.toFixed(6);
+    },
+
     renderCurrentScanTable: function(networks) {
         var self = this;
 
+        // Band color legend
+        var legend = E('div', { 'style': 'display: flex; gap: 20px; margin-bottom: 12px; font-size: 14px;' }, [
+            E('span', { 'style': 'display: flex; align-items: center; gap: 6px;' }, [
+                E('span', { 'style': 'display: inline-block; width: 16px; height: 16px; background: #1a3a5c; border-radius: 3px;' }),
+                E('span', { 'style': 'color: #e2e8f0;' }, '2.4 GHz')
+            ]),
+            E('span', { 'style': 'display: flex; align-items: center; gap: 6px;' }, [
+                E('span', { 'style': 'display: inline-block; width: 16px; height: 16px; background: #1a4a2e; border-radius: 3px;' }),
+                E('span', { 'style': 'color: #e2e8f0;' }, '5 GHz')
+            ]),
+            E('span', { 'style': 'display: flex; align-items: center; gap: 6px;' }, [
+                E('span', { 'style': 'display: inline-block; width: 16px; height: 16px; background: #3d1a4a; border-radius: 3px;' }),
+                E('span', { 'style': 'color: #e2e8f0;' }, '6 GHz')
+            ])
+        ]);
+
         if (!networks || networks.length === 0) {
-            return E('p', { 'style': 'color: #666;' }, 'No networks seen yet. Start scanning to see live results.');
+            return E('div', {}, [
+                legend,
+                E('div', { 'style': 'text-align: center; padding: 40px 20px; color: #e2e8f0; background: rgba(26,26,46,0.3); border-radius: 8px;' }, [
+                    E('p', { 'style': 'font-size: 1.2em; margin-bottom: 8px;' }, 'No networks seen yet'),
+                    E('p', { 'style': 'font-size: 1em; opacity: 0.7;' }, 'Start scanning to see live results')
+                ])
+            ]);
         }
 
+        var headerStyle = 'background: #1a1a2e; color: #ffffff; text-transform: uppercase; font-size: 13px; letter-spacing: 0.03em; font-weight: 600;';
+        var thStyle = 'padding: 14px 12px; text-align: left; border-bottom: 2px solid #2d2d44;';
+
         var rows = [
-            E('tr', {}, [
-                E('th', {}, 'Time'),
-                E('th', {}, 'BSSID'),
-                E('th', {}, 'SSID'),
-                E('th', {}, 'Channel'),
-                E('th', {}, 'Signal'),
-                E('th', {}, 'Encryption'),
-                E('th', {}, 'Source')
+            E('tr', { 'style': headerStyle }, [
+                E('th', { 'style': thStyle }, 'Time'),
+                E('th', { 'style': thStyle }, 'BSSID'),
+                E('th', { 'style': thStyle }, 'SSID'),
+                E('th', { 'style': thStyle + ' text-align: center;' }, 'Ch'),
+                E('th', { 'style': thStyle + ' text-align: center;' }, 'Signal'),
+                E('th', { 'style': thStyle }, 'Lat'),
+                E('th', { 'style': thStyle }, 'Lon'),
+                E('th', { 'style': thStyle }, 'Encryption'),
+                E('th', { 'style': thStyle }, 'Source')
             ])
         ];
 
-        networks.forEach(function(net) {
+        var tdBaseStyle = 'padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.08); color: #ffffff; font-size: 14px;';
+
+        networks.forEach(function(net, idx) {
             var bandColor = self.getBandColor(net.channel);
-            rows.push(E('tr', { 'style': 'background-color: ' + bandColor + ';' }, [
-                E('td', { 'style': 'font-family: monospace; font-size: 0.9em;' }, net.time || ''),
-                E('td', { 'style': 'font-family: monospace;' }, net.bssid),
-                E('td', {}, net.ssid || '<hidden>'),
-                E('td', {}, String(net.channel)),
-                E('td', {}, net.signal + ' dBm'),
-                E('td', {}, net.encryption),
-                E('td', {}, net.source || 'control')
+            var rowOpacity = idx % 2 === 0 ? '1' : '0.9';
+            rows.push(E('tr', { 'style': 'background-color: ' + bandColor + '; opacity: ' + rowOpacity + ';' }, [
+                E('td', { 'style': tdBaseStyle + ' font-family: monospace; white-space: nowrap;' }, net.time || ''),
+                E('td', { 'style': tdBaseStyle + ' font-family: monospace;' }, net.bssid),
+                E('td', { 'style': tdBaseStyle + ' max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, net.ssid || E('span', { 'style': 'opacity: 0.6; font-style: italic;' }, 'hidden')),
+                E('td', { 'style': tdBaseStyle + ' text-align: center; font-weight: 500;' }, String(net.channel)),
+                E('td', { 'style': tdBaseStyle + ' text-align: center; font-weight: 600; color: ' + self.getSignalColor(net.signal) + ';' }, net.signal + ' dBm'),
+                E('td', { 'style': tdBaseStyle + ' font-family: monospace;' }, self.formatCoord(net.lat)),
+                E('td', { 'style': tdBaseStyle + ' font-family: monospace;' }, self.formatCoord(net.lon)),
+                E('td', { 'style': tdBaseStyle }, net.encryption),
+                E('td', { 'style': tdBaseStyle }, net.source || 'control')
             ]));
         });
 
-        return E('table', { 'class': 'table', 'style': 'width: 100%;' }, rows);
+        var table = E('table', { 'class': 'table', 'style': 'width: 100%; border-collapse: separate; border-spacing: 0; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.25);' }, rows);
+
+        return E('div', {}, [legend, table]);
     },
 
     renderSessionsTable: function(sessions) {
