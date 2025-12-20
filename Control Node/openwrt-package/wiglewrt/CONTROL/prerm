@@ -1,0 +1,16 @@
+#!/bin/sh
+[ -z "${IPKG_INSTROOT}" ] || exit 0
+
+# Stop services
+/etc/init.d/wiglewrt stop 2>/dev/null
+/etc/init.d/wiglewrt-ble stop 2>/dev/null
+
+# Disable services
+/etc/init.d/wiglewrt disable 2>/dev/null
+/etc/init.d/wiglewrt-ble disable 2>/dev/null
+
+# Clean up runtime files
+rm -rf /tmp/wiglewrt
+rm -rf /tmp/wiglewrt_exports
+
+exit 0

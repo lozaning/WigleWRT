@@ -1,0 +1,25 @@
+
+config wiglewrt 'settings'
+	option enabled '1'
+	option autostart '1'
+	option hop_interval '500'
+	# Channel mode: 'common' (1,6,11 + common 5GHz) or 'all' (every channel)
+	option channel_mode 'common'
+	# Channel offset: '1' to offset dual-band radio from dedicated radios
+	option channel_offset '1'
+
+# Radio 0: 2.4GHz dedicated
+config radio 'radio0'
+	option enabled '1'
+	option band '2g'
+
+# Radio 1: 5GHz dedicated
+config radio 'radio1'
+	option enabled '1'
+	option band '5g'
+
+# Radio 2: Dual-band (scans both, offset from others when enabled)
+config radio 'radio2'
+	option enabled '1'
+	option band 'dual'
+

@@ -1,0 +1,92 @@
+#!/bin/sh /etc/rc.common
+# WigleWRT init script for OpenWRT
+
+START=99
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/bin/wiglewrt
+PID_FILE=/var/run/wiglewrt.pid
+
+start_service() {
+    local enabled
+
+    config_load wiglewrt
+    config_get enabled settings enabled 0
+
+    # Check if enabled
+    if [ "$enabled" != "1" ]; then
+        logger -t wiglewrt "Service disabled in configuration"
+        return 0
+    fi
+
+    # Ensure data directory exists
+    mkdir -p /etc/wiglewrt/sessions
+    mkdir -p /etc/wiglewrt/exports
+
+    # Clean up any stale PID file before starting
+    rm -f "$PID_FILE"
+
+    procd_open_instance
+    procd_set_param command "$PROG" start
+    # Disable respawn - wiglewrt manages its own lifecycle
+    # If it exits, it should stay stopped until manually restarted
+    procd_set_param respawn 0 0 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+
+    logger -t wiglewrt "Service started"
+}
+
+stop_service() {
+    if [ -f "$PID_FILE" ]; then
+        local pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            sleep 1
+            # Force kill if still running
+            kill -0 "$pid" 2>/dev/null && kill -9 "$pid"
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    # Cleanup any monitor interfaces that might be left
+    for iface in $(iw dev 2>/dev/null | grep -E "wlan[0-9]+mon" | awk '{print $2}'); do
+        iw dev "$iface" del 2>/dev/null
+    done
+
+    logger -t wiglewrt "Service stopped"
+}
+
+reload_service() {
+    stop
+    start
+}
+
+service_triggers() {
+    procd_add_reload_trigger "wiglewrt"
+}
+
+# Additional helper functions for command line
+status() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "WigleWRT is running (PID: $(cat "$PID_FILE"))"
+        "$PROG" status
+    else
+        echo "WigleWRT is stopped"
+    fi
+}
+
+boot() {
+    local autostart
+
+    config_load wiglewrt
+    config_get autostart settings autostart 0
+
+    if [ "$autostart" = "1" ]; then
+        # Small delay to ensure network/wireless is ready
+        sleep 5
+        start
+    fi
+}

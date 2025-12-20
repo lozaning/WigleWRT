@@ -1,0 +1,459 @@
+#!/bin/sh
+# WigleWRT ubus RPC handler
+
+VERSION=$(cat /usr/share/wiglewrt/VERSION 2>/dev/null || echo "2.5.0")
+
+DATA_DIR="/etc/wiglewrt"
+NETWORKS_FILE="$DATA_DIR/networks.tsv"
+SESSIONS_DIR="$DATA_DIR/sessions"
+CURRENT_SCAN_LOG="/tmp/wiglewrt/current_scan.log"
+PID_FILE="/tmp/wiglewrt/wiglewrt.pid"
+STRATEGY_FILE="/tmp/wiglewrt_strategy"
+
+# Check if running - check both pids file and scan pid files
+is_running() {
+    # Check individual scanner pid files first
+    for pidfile in /tmp/wiglewrt/scan_*.pid; do
+        if [ -f "$pidfile" ]; then
+            local pid=$(cat "$pidfile" 2>/dev/null)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                echo "1"
+                return 0
+            fi
+        fi
+    done
+
+    # Fall back to pids file
+    local pids_file="/tmp/wiglewrt/pids"
+    if [ -f "$pids_file" ]; then
+        for pid in $(cat "$pids_file" 2>/dev/null); do
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "1"
+                return 0
+            fi
+        done
+    fi
+    echo "0"
+    return 1
+}
+
+# Count networks
+count_networks() {
+    if [ -f "$NETWORKS_FILE" ]; then
+        tail -n +2 "$NETWORKS_FILE" 2>/dev/null | wc -l | tr -d ' '
+    else
+        echo "0"
+    fi
+}
+
+# Status method - reads strategy from file
+status() {
+    local running=$(is_running)
+    local total=$(count_networks)
+    local strategy="none"
+    local rate="0/s"
+
+    # Read strategy from file when running
+    if [ "$running" = "1" ] && [ -f "$STRATEGY_FILE" ]; then
+        strategy=$(cat "$STRATEGY_FILE" 2>/dev/null | tr -d '\n\r')
+    fi
+
+    # Read rate from status file if exists
+    if [ -f "/tmp/wiglewrt/status.json" ]; then
+        rate=$(grep -o '"rate":"[^"]*"' /tmp/wiglewrt/status.json 2>/dev/null | cut -d'"' -f4)
+        [ -z "$rate" ] && rate="0/s"
+    fi
+
+    cat << EOF
+{
+  "running": $running,
+  "networks": $total,
+  "rate": "$rate",
+  "strategy": "$strategy"
+}
+EOF
+}
+
+# Current scan method - returns live network sightings
+current_scan() {
+    local limit=${1:-50}
+
+    if [ ! -f "$CURRENT_SCAN_LOG" ]; then
+        echo '{"total": 0, "networks": []}'
+        return
+    fi
+
+    local total=$(wc -l < "$CURRENT_SCAN_LOG" 2>/dev/null | tr -d ' ')
+    [ -z "$total" ] && total=0
+
+    echo "{"
+    echo "  \"total\": $total,"
+    echo "  \"networks\": ["
+
+    # Read last N lines in reverse order (most recent first)
+    # Use awk to reverse since tac isn't available on OpenWRT
+    tail -n "$limit" "$CURRENT_SCAN_LOG" 2>/dev/null | awk '{a[NR]=$0} END {for(i=NR;i>=1;i--) print a[i]}' | \
+        awk -F'\t' '
+        BEGIN { first = 1 }
+        {
+            if ($1 == "") next
+            if (!first) printf ","
+            first = 0
+            # Clean SSID
+            ssid = $3
+            gsub(/\\/, "\\\\", ssid)
+            gsub(/"/, "\\\"", ssid)
+            gsub(/[[:cntrl:]]/, "", ssid)
+            if (ssid == "") ssid = "<hidden>"
+            printf "\n    {\"time\":\"%s\",\"bssid\":\"%s\",\"ssid\":\"%s\",\"channel\":\"%s\",\"signal\":\"%s\",\"encryption\":\"%s\",\"lat\":\"%s\",\"lon\":\"%s\"}", \
+                $1, $2, ssid, $4, $5, $6, $7, $8
+        }
+        END { printf "\n" }
+        '
+
+    echo "  ]"
+    echo "}"
+}
+
+# Sessions list method
+sessions_list() {
+    mkdir -p "$SESSIONS_DIR"
+
+    echo "{"
+    echo "  \"sessions\": ["
+
+    local first=1
+    for logfile in $(ls -t "$SESSIONS_DIR"/*.log 2>/dev/null); do
+        [ ! -f "$logfile" ] && continue
+
+        local session_id=$(basename "$logfile" .log)
+        local networks=0
+        local name=""
+
+        # Read metadata from first line if it starts with #meta:
+        local firstline=$(head -1 "$logfile" 2>/dev/null)
+        if echo "$firstline" | grep -q "^#meta:"; then
+            networks=$(echo "$firstline" | sed 's/.*networks=\([0-9]*\).*/\1/' 2>/dev/null)
+            name=$(echo "$firstline" | sed 's/.*start=\([^|]*\).*/\1/' 2>/dev/null)
+        else
+            # Count lines (excluding header/metadata)
+            networks=$(grep -v "^#" "$logfile" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+
+        # Format session name from ID (YYYYMMDD_HHMMSS -> YYYY-MM-DD HH:MM:SS)
+        if [ -z "$name" ]; then
+            name=$(echo "$session_id" | sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)_\([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)/\1-\2-\3 \4:\5:\6/')
+        fi
+
+        [ $first -eq 0 ] && echo ","
+        first=0
+
+        printf "    {\"id\":\"%s\",\"name\":\"%s\",\"networks\":%s}" "$session_id" "$name" "${networks:-0}"
+    done
+
+    echo ""
+    echo "  ]"
+    echo "}"
+}
+
+# Session export method
+session_export() {
+    local session_id="$1"
+    local logfile="$SESSIONS_DIR/$session_id.log"
+
+    if [ ! -f "$logfile" ]; then
+        echo '{"success": false, "message": "Session not found"}'
+        return
+    fi
+
+    # Generate WiGLE CSV
+    local outfile="/tmp/wiglewrt_exports/wiglewrt_${session_id}.csv"
+    mkdir -p /tmp/wiglewrt_exports
+
+    # Write WiGLE header
+    cat > "$outfile" << 'HEADER'
+WigleWifi-1.4,appRelease=WigleWRT,model=OnHub,release=2.5.0,device=OpenWRT,display=none,board=ipq806x,brand=Google
+MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type
+HEADER
+
+    # Convert log to WiGLE format (skip metadata line)
+    grep -v "^#" "$logfile" 2>/dev/null | awk -F'\t' '{
+        # Map encryption to WiGLE format
+        enc = $6
+        if (enc == "WPA2") enc = "[WPA2-PSK-CCMP]"
+        else if (enc == "WPA") enc = "[WPA-PSK-CCMP]"
+        else if (enc == "WEP") enc = "[WEP]"
+        else if (enc == "Open") enc = "[OPEN]"
+        else enc = "[" enc "]"
+
+        # Output: MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,Lat,Lon,Alt,Acc,Type
+        printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,WIFI\n", $2, $3, enc, $1, $4, $5, $7, $8, "", ""
+    }' >> "$outfile"
+
+    local filename=$(basename "$outfile")
+    echo "{\"success\": true, \"filename\": \"$filename\"}"
+}
+
+# Session delete method
+session_delete() {
+    local session_id="$1"
+
+    # Security: validate session ID format
+    case "$session_id" in
+        *[!a-zA-Z0-9_-]*)
+            echo '{"success": false, "message": "Invalid session ID"}'
+            return
+            ;;
+    esac
+
+    local logfile="$SESSIONS_DIR/$session_id.log"
+
+    if [ -f "$logfile" ]; then
+        rm -f "$logfile"
+        echo '{"success": true}'
+    else
+        echo '{"success": false, "message": "Session not found"}'
+    fi
+}
+
+# Networks method (legacy - for all-time network database)
+networks() {
+    local limit=${1:-100}
+    local offset=${2:-0}
+
+    echo "{"
+    echo "  \"total\": $(count_networks),"
+    echo "  \"limit\": $limit,"
+    echo "  \"offset\": $offset,"
+    echo "  \"networks\": ["
+
+    tail -n +2 "$NETWORKS_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' | \
+        sort -t'	' -k7 -r | \
+        tail -n "+$((offset + 1))" | head -n "$limit" | \
+        awk -F'\t' '
+        BEGIN { first = 1 }
+        {
+            if ($1 == "" || length($1) < 10) next
+            if (!first) printf ","
+            first = 0
+            ssid = $2
+            gsub(/\\/, "\\\\", ssid)
+            gsub(/"/, "\\\"", ssid)
+            gsub(/[[:cntrl:]]/, "", ssid)
+            if (ssid == "") ssid = "<hidden>"
+            printf "\n    {\"bssid\":\"%s\",\"ssid\":\"%s\",\"channel\":\"%s\",\"signal\":\"%s\",\"encryption\":\"%s\",\"first_seen\":\"%s\",\"last_seen\":\"%s\",\"times_seen\":%s,\"lat\":\"%s\",\"lon\":\"%s\"}", \
+                $1, ssid, $3, $4, $5, $6, $7, ($8 ? $8 : 1), $9, $10
+        }
+        END { printf "\n" }
+        '
+
+    echo "  ]"
+    echo "}"
+}
+
+# GPS status method
+gps_status() {
+    local gps_valid=0
+    local lat=""
+    local lon=""
+    local sats=0
+    local source="none"
+
+    # Try gpsd first
+    if command -v gpspipe >/dev/null 2>&1; then
+        local gpsd_data=$(timeout 2 gpspipe -w -n 5 2>/dev/null | grep -m1 '"class":"TPV"')
+        if [ -n "$gpsd_data" ]; then
+            source="gpsd"
+            local mode=$(echo "$gpsd_data" | sed 's/.*"mode":\([0-9]*\).*/\1/' 2>/dev/null)
+            if [ "$mode" = "2" ] || [ "$mode" = "3" ]; then
+                gps_valid=1
+                lat=$(echo "$gpsd_data" | sed 's/.*"lat":\([^,}]*\).*/\1/' 2>/dev/null)
+                lon=$(echo "$gpsd_data" | sed 's/.*"lon":\([^,}]*\).*/\1/' 2>/dev/null)
+            fi
+            local sky_data=$(timeout 1 gpspipe -w -n 10 2>/dev/null | grep -m1 '"class":"SKY"')
+            if [ -n "$sky_data" ]; then
+                sats=$(echo "$sky_data" | sed 's/.*"nSat":\([0-9]*\).*/\1/' 2>/dev/null)
+                [ -z "$sats" ] && sats=0
+            fi
+
+            cat << EOF
+{
+  "fix": $gps_valid,
+  "lat": $lat,
+  "lon": $lon,
+  "sats": $sats,
+  "source": "$source"
+}
+EOF
+            return
+        fi
+    fi
+
+    # Fallback to direct device
+    for dev in /dev/ttyACM0 /dev/ttyACM1 /dev/ttyUSB0; do
+        if [ -c "$dev" ]; then
+            source="direct"
+            # Quick read of GPS device
+            local nmea=$(timeout 3 cat "$dev" 2>/dev/null)
+            local rmc=$(echo "$nmea" | grep -E '\$G[NP]RMC' | head -1)
+
+            # Get sat count from GSV
+            local gsv=$(echo "$nmea" | grep -E '\$G[PNLB]GSV' | head -1)
+            sats=$(echo "$gsv" | cut -d, -f4)
+            [ -z "$sats" ] && sats=0
+
+            if [ -n "$rmc" ]; then
+                local status=$(echo "$rmc" | cut -d, -f3)
+                if [ "$status" = "A" ]; then
+                    gps_valid=1
+                    local lat_raw=$(echo "$rmc" | cut -d, -f4)
+                    local lat_dir=$(echo "$rmc" | cut -d, -f5)
+                    local lon_raw=$(echo "$rmc" | cut -d, -f6)
+                    local lon_dir=$(echo "$rmc" | cut -d, -f7)
+
+                    if [ -n "$lat_raw" ] && [ -n "$lon_raw" ]; then
+                        lat_deg=$(echo "$lat_raw" | cut -c1-2)
+                        lat_min=$(echo "$lat_raw" | cut -c3-)
+                        lat=$(awk "BEGIN {printf \"%.6f\", $lat_deg + ($lat_min / 60)}" 2>/dev/null)
+                        [ "$lat_dir" = "S" ] && lat="-$lat"
+
+                        lon_deg=$(echo "$lon_raw" | cut -c1-3)
+                        lon_min=$(echo "$lon_raw" | cut -c4-)
+                        lon=$(awk "BEGIN {printf \"%.6f\", $lon_deg + ($lon_min / 60)}" 2>/dev/null)
+                        [ "$lon_dir" = "W" ] && lon="-$lon"
+                    fi
+                fi
+            fi
+            break
+        fi
+    done
+
+    cat << EOF
+{
+  "fix": $gps_valid,
+  "lat": ${lat:-0},
+  "lon": ${lon:-0},
+  "sats": $sats,
+  "source": "$source"
+}
+EOF
+}
+
+# Start method
+do_start() {
+    local dwell=${1:-500}
+
+    if [ "$(is_running)" = "1" ]; then
+        echo '{"success": false, "message": "Already running"}'
+        return
+    fi
+
+    # Clear current scan log for new session
+    mkdir -p /tmp/wiglewrt
+    > "$CURRENT_SCAN_LOG"
+
+    # Write strategy file
+    echo "fixed_${dwell}" > "$STRATEGY_FILE"
+
+    /usr/bin/wiglewrt start "$dwell" >/dev/null 2>&1 &
+    sleep 4
+
+    if [ "$(is_running)" = "1" ]; then
+        echo '{"success": true, "message": "Scanner started"}'
+    else
+        echo '{"success": false, "message": "Failed to start scanner"}'
+    fi
+}
+
+# Stop method
+do_stop() {
+    if [ "$(is_running)" = "0" ]; then
+        echo '{"success": false, "message": "Not running"}'
+        return
+    fi
+
+    # Save current scan as session before stopping
+    if [ -f "$CURRENT_SCAN_LOG" ] && [ -s "$CURRENT_SCAN_LOG" ]; then
+        mkdir -p "$SESSIONS_DIR"
+        local session_id=$(date +%Y%m%d_%H%M%S)
+        local networks=$(wc -l < "$CURRENT_SCAN_LOG" | tr -d ' ')
+        local strategy=$(cat "$STRATEGY_FILE" 2>/dev/null)
+
+        # Write session with metadata
+        echo "#meta:start=$(date '+%Y-%m-%d %H:%M:%S')|networks=$networks|strategy=$strategy" > "$SESSIONS_DIR/$session_id.log"
+        cat "$CURRENT_SCAN_LOG" >> "$SESSIONS_DIR/$session_id.log"
+    fi
+
+    /usr/bin/wiglewrt stop >/dev/null 2>&1
+    killall wiglewrt-scan wiglewrt-gps wiglewrt-leds 2>/dev/null
+    rm -f /tmp/wiglewrt/pids /tmp/wiglewrt/wiglewrt.pid
+
+    echo '{"success": true, "message": "Scanner stopped"}'
+}
+
+# Export all method
+do_export() {
+    local output=$(/usr/bin/wiglewrt-export all 2>/dev/null)
+    local filepath=$(echo "$output" | grep -o '/[^ ]*\.csv' | head -1 | tr -d '\n\r')
+
+    if [ -n "$filepath" ]; then
+        local filename=$(basename "$filepath")
+        echo "{\"success\": true, \"filename\": \"$filename\"}"
+    else
+        echo '{"success": false, "filename": ""}'
+    fi
+}
+
+# Main dispatch
+case "$1" in
+    list)
+        echo '{"status":{},"networks":{"limit":"int","offset":"int"},"current_scan":{"limit":"int"},"sessions_list":{},"session_export":{"session_id":"str"},"session_delete":{"session_id":"str"},"gps_status":{},"start":{"dwell":"int"},"stop":{},"export":{}}'
+        ;;
+    call)
+        read input
+        case "$2" in
+            status)
+                status
+                ;;
+            networks)
+                limit=$(echo "$input" | jsonfilter -e '@.limit' 2>/dev/null || echo 100)
+                offset=$(echo "$input" | jsonfilter -e '@.offset' 2>/dev/null || echo 0)
+                networks "$limit" "$offset"
+                ;;
+            current_scan)
+                limit=$(echo "$input" | jsonfilter -e '@.limit' 2>/dev/null || echo 50)
+                current_scan "$limit"
+                ;;
+            sessions_list)
+                sessions_list
+                ;;
+            session_export)
+                session_id=$(echo "$input" | jsonfilter -e '@.session_id' 2>/dev/null)
+                session_export "$session_id"
+                ;;
+            session_delete)
+                session_id=$(echo "$input" | jsonfilter -e '@.session_id' 2>/dev/null)
+                session_delete "$session_id"
+                ;;
+            gps_status)
+                gps_status
+                ;;
+            start)
+                dwell=$(echo "$input" | jsonfilter -e '@.dwell' 2>/dev/null || echo 500)
+                do_start "$dwell"
+                ;;
+            stop)
+                do_stop
+                ;;
+            export)
+                do_export
+                ;;
+            *)
+                echo '{"error": "Unknown method"}'
+                ;;
+        esac
+        ;;
+    *)
+        echo '{"error": "Unknown command"}'
+        ;;
+esac

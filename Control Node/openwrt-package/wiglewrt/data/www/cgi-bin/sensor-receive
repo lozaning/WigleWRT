@@ -1,0 +1,22 @@
+#!/bin/sh
+# sensor-receive - Fixed for uhttpd stdin handling
+QUEUE_DIR="/tmp/wiglewrt/sensor_queue"
+mkdir -p "$QUEUE_DIR"
+
+QUEUE_FILE="$QUEUE_DIR/$(date +%s)_$$.json"
+
+# uhttpd might buffer stdin differently - use cat to file then check
+cat > "$QUEUE_FILE"
+
+# Validate we have data
+if [ ! -s "$QUEUE_FILE" ]; then
+    rm -f "$QUEUE_FILE"
+    echo "Content-Type: application/json"
+    echo ""
+    echo "{\"success\":false,\"error\":\"no data\"}"
+    exit 0
+fi
+
+echo "Content-Type: application/json"
+echo ""
+echo "{\"success\":true,\"queued\":true}"

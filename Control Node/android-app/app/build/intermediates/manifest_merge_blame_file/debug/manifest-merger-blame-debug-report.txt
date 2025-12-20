@@ -1,0 +1,105 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.wiglewrt.monitor"
+4    android:versionCode="1"
+5    android:versionName="1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="26"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.BLUETOOTH" />
+11-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:4:5-68
+11-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:4:22-65
+12    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+12-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:5:5-74
+12-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:5:22-71
+13    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+13-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:6:5-73
+13-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:6:22-70
+14    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+14-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:7:5-76
+14-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:7:22-73
+15    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+15-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:8:5-79
+15-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:8:22-76
+16    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+16-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:9:5-81
+16-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:9:22-78
+17
+18    <uses-feature
+18-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:11:5-90
+19        android:name="android.hardware.bluetooth_le"
+19-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:11:19-63
+20        android:required="true" />
+20-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:11:64-87
+21
+22    <permission
+22-->[androidx.core:core:1.9.0] /Users/lozaning/.gradle/caches/transforms-3/4ab019a3ddfb7ce3703db84cb1361db5/transformed/core-1.9.0/AndroidManifest.xml:22:5-24:47
+23        android:name="com.wiglewrt.monitor.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+23-->[androidx.core:core:1.9.0] /Users/lozaning/.gradle/caches/transforms-3/4ab019a3ddfb7ce3703db84cb1361db5/transformed/core-1.9.0/AndroidManifest.xml:23:9-81
+24        android:protectionLevel="signature" />
+24-->[androidx.core:core:1.9.0] /Users/lozaning/.gradle/caches/transforms-3/4ab019a3ddfb7ce3703db84cb1361db5/transformed/core-1.9.0/AndroidManifest.xml:24:9-44
+25
+26    <uses-permission android:name="com.wiglewrt.monitor.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+26-->[androidx.core:core:1.9.0] /Users/lozaning/.gradle/caches/transforms-3/4ab019a3ddfb7ce3703db84cb1361db5/transformed/core-1.9.0/AndroidManifest.xml:26:5-97
+26-->[androidx.core:core:1.9.0] /Users/lozaning/.gradle/caches/transforms-3/4ab019a3ddfb7ce3703db84cb1361db5/transformed/core-1.9.0/AndroidManifest.xml:26:22-94
+27
+28    <application
+28-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:13:5-29:19
+29        android:allowBackup="true"
+29-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:14:9-35
+30        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+30-->[androidx.core:core:1.9.0] /Users/lozaning/.gradle/caches/transforms-3/4ab019a3ddfb7ce3703db84cb1361db5/transformed/core-1.9.0/AndroidManifest.xml:28:18-86
+31        android:debuggable="true"
+32        android:extractNativeLibs="false"
+33        android:icon="@drawable/ic_launcher"
+33-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:15:9-45
+34        android:label="@string/app_name"
+34-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:16:9-41
+35        android:theme="@style/Theme.WigleWRT" >
+35-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:17:9-46
+36        <activity
+36-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:19:9-27:20
+37            android:name="com.wiglewrt.monitor.MainActivity"
+37-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:20:13-41
+38            android:exported="true"
+38-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:21:13-36
+39            android:screenOrientation="portrait" >
+39-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:22:13-49
+40            <intent-filter>
+40-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:23:13-26:29
+41                <action android:name="android.intent.action.MAIN" />
+41-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:24:17-69
+41-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:24:25-66
+42
+43                <category android:name="android.intent.category.LAUNCHER" />
+43-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:25:17-77
+43-->/Users/lozaning/WigleWRT/android-app/app/src/main/AndroidManifest.xml:25:27-74
+44            </intent-filter>
+45        </activity>
+46
+47        <provider
+47-->[androidx.emoji2:emoji2:1.2.0] /Users/lozaning/.gradle/caches/transforms-3/0c05c4483bc355aad7724c4039b9fe4a/transformed/emoji2-1.2.0/AndroidManifest.xml:24:9-32:20
+48            android:name="androidx.startup.InitializationProvider"
+48-->[androidx.emoji2:emoji2:1.2.0] /Users/lozaning/.gradle/caches/transforms-3/0c05c4483bc355aad7724c4039b9fe4a/transformed/emoji2-1.2.0/AndroidManifest.xml:25:13-67
+49            android:authorities="com.wiglewrt.monitor.androidx-startup"
+49-->[androidx.emoji2:emoji2:1.2.0] /Users/lozaning/.gradle/caches/transforms-3/0c05c4483bc355aad7724c4039b9fe4a/transformed/emoji2-1.2.0/AndroidManifest.xml:26:13-68
+50            android:exported="false" >
+50-->[androidx.emoji2:emoji2:1.2.0] /Users/lozaning/.gradle/caches/transforms-3/0c05c4483bc355aad7724c4039b9fe4a/transformed/emoji2-1.2.0/AndroidManifest.xml:27:13-37
+51            <meta-data
+51-->[androidx.emoji2:emoji2:1.2.0] /Users/lozaning/.gradle/caches/transforms-3/0c05c4483bc355aad7724c4039b9fe4a/transformed/emoji2-1.2.0/AndroidManifest.xml:29:13-31:52
+52                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+52-->[androidx.emoji2:emoji2:1.2.0] /Users/lozaning/.gradle/caches/transforms-3/0c05c4483bc355aad7724c4039b9fe4a/transformed/emoji2-1.2.0/AndroidManifest.xml:30:17-75
+53                android:value="androidx.startup" />
+53-->[androidx.emoji2:emoji2:1.2.0] /Users/lozaning/.gradle/caches/transforms-3/0c05c4483bc355aad7724c4039b9fe4a/transformed/emoji2-1.2.0/AndroidManifest.xml:31:17-49
+54            <meta-data
+54-->[androidx.lifecycle:lifecycle-process:2.4.1] /Users/lozaning/.gradle/caches/transforms-3/6b0b46109bba3b29f30d36cba913fc16/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:31:13-33:52
+55                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+55-->[androidx.lifecycle:lifecycle-process:2.4.1] /Users/lozaning/.gradle/caches/transforms-3/6b0b46109bba3b29f30d36cba913fc16/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:32:17-78
+56                android:value="androidx.startup" />
+56-->[androidx.lifecycle:lifecycle-process:2.4.1] /Users/lozaning/.gradle/caches/transforms-3/6b0b46109bba3b29f30d36cba913fc16/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:33:17-49
+57        </provider>
+58    </application>
+59
+60</manifest>

@@ -1,0 +1,468 @@
+#!/bin/sh
+# WigleWRT ubus RPC handler
+
+VERSION=$(cat /usr/share/wiglewrt/VERSION 2>/dev/null || echo "2.9.1")
+
+DATA_DIR="/etc/wiglewrt"
+SESSION_DIR="$DATA_DIR/sessions"
+CURRENT_SESSION="$SESSION_DIR/current.csv"
+SESSION_STATE="/tmp/wiglewrt/session_state.json"
+PID_FILE="/tmp/wiglewrt/wiglewrt.pid"
+STRATEGY_FILE="/tmp/wiglewrt_strategy"
+
+# Check if running - check both pids file and scan pid files
+is_running() {
+    # Check individual scanner pid files first
+    for pidfile in /tmp/wiglewrt/scan_*.pid; do
+        if [ -f "$pidfile" ]; then
+            local pid=$(cat "$pidfile" 2>/dev/null)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                echo "1"
+                return 0
+            fi
+        fi
+    done
+
+    # Fall back to pids file
+    local pids_file="/tmp/wiglewrt/pids"
+    if [ -f "$pids_file" ]; then
+        for pid in $(cat "$pids_file" 2>/dev/null); do
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "1"
+                return 0
+            fi
+        done
+    fi
+    echo "0"
+    return 1
+}
+
+# Get config values
+get_config() {
+    local channel_mode="common"
+    local channel_offset="1"
+    local hop_interval="500"
+
+    if command -v uci >/dev/null 2>&1; then
+        local val
+        val=$(uci -q get wiglewrt.settings.channel_mode)
+        [ -n "$val" ] && channel_mode="$val"
+        val=$(uci -q get wiglewrt.settings.channel_offset)
+        [ -n "$val" ] && channel_offset="$val"
+        val=$(uci -q get wiglewrt.settings.hop_interval)
+        [ -n "$val" ] && hop_interval="$val"
+    fi
+
+    cat << EOF
+{
+  "channel_mode": "$channel_mode",
+  "channel_offset": "$channel_offset",
+  "hop_interval": $hop_interval
+}
+EOF
+}
+
+# Set config values
+set_config() {
+    local channel_mode="$1"
+    local channel_offset="$2"
+    local hop_interval="$3"
+
+    if ! command -v uci >/dev/null 2>&1; then
+        echo '{"success": false, "message": "UCI not available"}'
+        return
+    fi
+
+    # Validate channel_mode
+    case "$channel_mode" in
+        common|all) ;;
+        *)
+            echo '{"success": false, "message": "Invalid channel_mode"}'
+            return
+            ;;
+    esac
+
+    # Validate channel_offset
+    case "$channel_offset" in
+        0|1) ;;
+        *)
+            echo '{"success": false, "message": "Invalid channel_offset"}'
+            return
+            ;;
+    esac
+
+    # Validate hop_interval
+    case "$hop_interval" in
+        ''|*[!0-9]*)
+            echo '{"success": false, "message": "Invalid hop_interval"}'
+            return
+            ;;
+    esac
+
+    # Apply settings
+    uci set wiglewrt.settings.channel_mode="$channel_mode"
+    uci set wiglewrt.settings.channel_offset="$channel_offset"
+    uci set wiglewrt.settings.hop_interval="$hop_interval"
+    uci commit wiglewrt
+
+    echo '{"success": true, "message": "Config saved"}'
+}
+
+# Status method - reads from session_state.json
+status() {
+    local running=$(is_running)
+    local unique=0
+    local sightings=0
+    local strategy="none"
+    local rate="0/s"
+    local channel_mode="common"
+    local channel_offset="1"
+
+    # Read strategy from file when running
+    if [ "$running" = "1" ] && [ -f "$STRATEGY_FILE" ]; then
+        strategy=$(cat "$STRATEGY_FILE" 2>/dev/null | tr -d '\n\r')
+    fi
+
+    # Read from session state
+    if [ -f "$SESSION_STATE" ]; then
+        unique=$(grep -o '"unique_networks":[0-9]*' "$SESSION_STATE" 2>/dev/null | cut -d: -f2)
+        sightings=$(grep -o '"total_sightings":[0-9]*' "$SESSION_STATE" 2>/dev/null | cut -d: -f2)
+    fi
+
+    # Read rate from status file if exists
+    if [ -f "/tmp/wiglewrt/status.json" ]; then
+        rate=$(grep -o '"rate":"[^"]*"' /tmp/wiglewrt/status.json 2>/dev/null | cut -d'"' -f4)
+        [ -z "$rate" ] && rate="0/s"
+    fi
+
+    # Read current config
+    if command -v uci >/dev/null 2>&1; then
+        local val
+        val=$(uci -q get wiglewrt.settings.channel_mode)
+        [ -n "$val" ] && channel_mode="$val"
+        val=$(uci -q get wiglewrt.settings.channel_offset)
+        [ -n "$val" ] && channel_offset="$val"
+    fi
+
+    cat << EOF
+{
+  "running": $running,
+  "unique_networks": ${unique:-0},
+  "total_sightings": ${sightings:-0},
+  "rate": "$rate",
+  "strategy": "$strategy",
+  "channel_mode": "$channel_mode",
+  "channel_offset": "$channel_offset"
+}
+EOF
+}
+
+# Current scan method - returns live network sightings from current session CSV
+current_scan() {
+    local limit=${1:-50}
+    local source_file="/tmp/wiglewrt/source_tracking.txt"
+
+    if [ ! -f "$CURRENT_SESSION" ]; then
+        echo '{"total": 0, "networks": []}'
+        return
+    fi
+
+    # Skip first 2 lines (WiGLE header)
+    local total=$(tail -n +3 "$CURRENT_SESSION" 2>/dev/null | wc -l | tr -d ' ')
+    [ -z "$total" ] && total=0
+
+    echo "{"
+    echo "  \"total\": $total,"
+    echo "  \"networks\": ["
+
+    # Read last N lines in reverse order (most recent first)
+    # CSV format: MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,Lat,Lon,Alt,Acc,Type
+    # Source tracking format: BSSID|timestamp|source
+    tail -n +3 "$CURRENT_SESSION" 2>/dev/null | tail -n "$limit" | awk '{a[NR]=$0} END {for(i=NR;i>=1;i--) print a[i]}' | \
+        awk -F',' -v srcfile="$source_file" '
+        BEGIN {
+            first = 1
+            # Load source tracking into associative array (bssid|timestamp -> source)
+            while ((getline line < srcfile) > 0) {
+                n = split(line, parts, "|")
+                if (n >= 3) {
+                    key = parts[1] "|" parts[2]
+                    sources[key] = parts[3]
+                }
+            }
+            close(srcfile)
+        }
+        {
+            if ($1 == "") next
+            if (!first) printf ","
+            first = 0
+            # Parse fields
+            bssid = $1
+            ssid = $2
+            enc = $3
+            ts = $4
+            channel = $5
+            signal = $6
+            lat = $7
+            lon = $8
+            # Look up source
+            key = bssid "|" ts
+            source = sources[key]
+            if (source == "") source = "control"
+            # Clean SSID
+            gsub(/\\/, "\\\\", ssid)
+            gsub(/"/, "\\\"", ssid)
+            gsub(/[[:cntrl:]]/, "", ssid)
+            if (ssid == "") ssid = "<hidden>"
+            printf "\n    {\"time\":\"%s\",\"bssid\":\"%s\",\"ssid\":\"%s\",\"channel\":\"%s\",\"signal\":\"%s\",\"encryption\":\"%s\",\"lat\":\"%s\",\"lon\":\"%s\",\"source\":\"%s\"}", \
+                ts, bssid, ssid, channel, signal, enc, lat, lon, source
+        }
+        END { printf "\n" }
+        '
+
+    echo "  ]"
+    echo "}"
+}
+
+# Sessions list method - reads from .meta files for speed, falls back to CSV counting
+sessions_list() {
+    mkdir -p "$SESSION_DIR"
+
+    echo "{"
+    echo "  \"sessions\": ["
+
+    local first=1
+    for csvfile in $(ls -t "$SESSION_DIR"/*.csv 2>/dev/null); do
+        [ ! -f "$csvfile" ] && continue
+        # Skip current session
+        [ "$(basename "$csvfile")" = "current.csv" ] && continue
+
+        local session_id=$(basename "$csvfile" .csv)
+        local meta_file="$SESSION_DIR/${session_id}.meta"
+        local total=""
+        local unique=""
+
+        # Try reading from metadata file first (fast path)
+        if [ -f "$meta_file" ]; then
+            total=$(grep -o '"networks":[0-9]*' "$meta_file" 2>/dev/null | cut -d: -f2)
+            unique=$(grep -o '"unique":[0-9]*' "$meta_file" 2>/dev/null | cut -d: -f2)
+        fi
+
+        # Fall back to counting if no metadata (slow path for legacy/orphaned sessions)
+        if [ -z "$total" ]; then
+            total=$(tail -n +3 "$csvfile" 2>/dev/null | wc -l | tr -d ' ')
+            unique=$(tail -n +3 "$csvfile" 2>/dev/null | cut -d',' -f1 | sort -u | wc -l | tr -d ' ')
+            # Write metadata so we don't have to count again next time
+            echo "{\"networks\":${total:-0},\"unique\":${unique:-0}}" > "$meta_file" 2>/dev/null
+        fi
+
+        # Format session name from ID (YYYYMMDD_HHMMSS -> YYYY-MM-DD HH:MM:SS)
+        local name=$(echo "$session_id" | sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)_\([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)/\1-\2-\3 \4:\5:\6/')
+
+        [ $first -eq 0 ] && echo ","
+        first=0
+
+        printf "    {\"id\":\"%s\",\"name\":\"%s\",\"networks\":%s,\"unique\":%s}" "$session_id" "$name" "${total:-0}" "${unique:-0}"
+    done
+
+    echo ""
+    echo "  ]"
+    echo "}"
+}
+
+# Session export method - sessions are already in WiGLE CSV format!
+session_export() {
+    local session_id="$1"
+    local csvfile="$SESSION_DIR/$session_id.csv"
+
+    if [ ! -f "$csvfile" ]; then
+        echo '{"success": false, "message": "Session not found"}'
+        return
+    fi
+
+    # Sessions are already in WiGLE format, just copy to exports dir
+    local outfile="/tmp/wiglewrt_exports/wiglewrt_${session_id}.csv"
+    mkdir -p /tmp/wiglewrt_exports
+    cp "$csvfile" "$outfile"
+
+    local filename=$(basename "$outfile")
+    echo "{\"success\": true, \"filename\": \"$filename\"}"
+}
+
+# Session delete method
+session_delete() {
+    local session_id="$1"
+
+    # Security: validate session ID format
+    case "$session_id" in
+        *[!a-zA-Z0-9_-]*)
+            echo '{"success": false, "message": "Invalid session ID"}'
+            return
+            ;;
+    esac
+
+    local csvfile="$SESSION_DIR/$session_id.csv"
+
+    if [ -f "$csvfile" ]; then
+        rm -f "$csvfile"
+        echo '{"success": true}'
+    else
+        echo '{"success": false, "message": "Session not found"}'
+    fi
+}
+
+# GPS status method
+gps_status() {
+    local gps_valid=0
+    local lat=""
+    local lon=""
+    local sats=0
+    local source="none"
+
+    # Try reading from GPS file first (fastest)
+    if [ -f "/tmp/wiglewrt/gps.current" ]; then
+        local gps_line=$(cat "/tmp/wiglewrt/gps.current" 2>/dev/null)
+        if [ -n "$gps_line" ]; then
+            lat=$(echo "$gps_line" | cut -f1)
+            lon=$(echo "$gps_line" | cut -f2)
+            local alt=$(echo "$gps_line" | cut -f3)
+            sats=$(echo "$gps_line" | cut -f6)
+            if [ -n "$lat" ] && [ "$lat" != "0" ] && [ "$lat" != "" ]; then
+                gps_valid=1
+                source="daemon"
+            fi
+        fi
+    fi
+
+    # If no daemon data, try gpsd
+    if [ "$gps_valid" = "0" ] && command -v gpspipe >/dev/null 2>&1; then
+        local gpsd_data=$(timeout 2 gpspipe -w -n 5 2>/dev/null | grep -m1 '"class":"TPV"')
+        if [ -n "$gpsd_data" ]; then
+            source="gpsd"
+            local mode=$(echo "$gpsd_data" | sed 's/.*"mode":\([0-9]*\).*/\1/' 2>/dev/null)
+            if [ "$mode" = "2" ] || [ "$mode" = "3" ]; then
+                gps_valid=1
+                lat=$(echo "$gpsd_data" | sed 's/.*"lat":\([^,}]*\).*/\1/' 2>/dev/null)
+                lon=$(echo "$gpsd_data" | sed 's/.*"lon":\([^,}]*\).*/\1/' 2>/dev/null)
+            fi
+        fi
+    fi
+
+    cat << EOF
+{
+  "fix": $gps_valid,
+  "lat": ${lat:-0},
+  "lon": ${lon:-0},
+  "sats": ${sats:-0},
+  "source": "$source"
+}
+EOF
+}
+
+# Start method
+do_start() {
+    local dwell=${1:-500}
+
+    if [ "$(is_running)" = "1" ]; then
+        echo '{"success": false, "message": "Already running"}'
+        return
+    fi
+
+    /usr/bin/wiglewrt start "$dwell" >/dev/null 2>&1 &
+    sleep 4
+
+    if [ "$(is_running)" = "1" ]; then
+        echo '{"success": true, "message": "Scanner started"}'
+    else
+        echo '{"success": false, "message": "Failed to start scanner"}'
+    fi
+}
+
+# Stop method
+do_stop() {
+    if [ "$(is_running)" = "0" ]; then
+        echo '{"success": false, "message": "Not running"}'
+        return
+    fi
+
+    /usr/bin/wiglewrt stop >/dev/null 2>&1
+    killall wiglewrt-scan wiglewrt-gps wiglewrt-leds 2>/dev/null
+    rm -f /tmp/wiglewrt/pids /tmp/wiglewrt/wiglewrt.pid
+
+    echo '{"success": true, "message": "Scanner stopped"}'
+}
+
+# Export current session
+do_export() {
+    if [ ! -f "$CURRENT_SESSION" ]; then
+        echo '{"success": false, "filename": ""}'
+        return
+    fi
+
+    # Sessions are already in WiGLE format
+    local session_id=$(date +%Y%m%d_%H%M%S)
+    local outfile="/tmp/wiglewrt_exports/wiglewrt_${session_id}.csv"
+    mkdir -p /tmp/wiglewrt_exports
+    cp "$CURRENT_SESSION" "$outfile"
+
+    local filename=$(basename "$outfile")
+    echo "{\"success\": true, \"filename\": \"$filename\"}"
+}
+
+# Main dispatch
+case "$1" in
+    list)
+        echo '{"status":{},"current_scan":{"limit":"int"},"sessions_list":{},"session_export":{"session_id":"str"},"session_delete":{"session_id":"str"},"gps_status":{},"start":{"dwell":"int"},"stop":{},"export":{},"get_config":{},"set_config":{"channel_mode":"str","channel_offset":"str","hop_interval":"int"}}'
+        ;;
+    call)
+        read input
+        case "$2" in
+            status)
+                status
+                ;;
+            current_scan)
+                limit=$(echo "$input" | jsonfilter -e '@.limit' 2>/dev/null || echo 50)
+                current_scan "$limit"
+                ;;
+            sessions_list)
+                sessions_list
+                ;;
+            session_export)
+                session_id=$(echo "$input" | jsonfilter -e '@.session_id' 2>/dev/null)
+                session_export "$session_id"
+                ;;
+            session_delete)
+                session_id=$(echo "$input" | jsonfilter -e '@.session_id' 2>/dev/null)
+                session_delete "$session_id"
+                ;;
+            gps_status)
+                gps_status
+                ;;
+            start)
+                dwell=$(echo "$input" | jsonfilter -e '@.dwell' 2>/dev/null || echo 500)
+                do_start "$dwell"
+                ;;
+            stop)
+                do_stop
+                ;;
+            export)
+                do_export
+                ;;
+            get_config)
+                get_config
+                ;;
+            set_config)
+                channel_mode=$(echo "$input" | jsonfilter -e '@.channel_mode' 2>/dev/null || echo "common")
+                channel_offset=$(echo "$input" | jsonfilter -e '@.channel_offset' 2>/dev/null || echo "1")
+                hop_interval=$(echo "$input" | jsonfilter -e '@.hop_interval' 2>/dev/null || echo "500")
+                set_config "$channel_mode" "$channel_offset" "$hop_interval"
+                ;;
+            *)
+                echo '{"error": "Unknown method"}'
+                ;;
+        esac
+        ;;
+    *)
+        echo '{"error": "Unknown command"}'
+        ;;
+esac

@@ -1,0 +1,157 @@
+#!/bin/sh
+# scan.sh - Per-radio scanner for WigleWRT v2
+# Runs one instance per wireless interface, writes session data directly
+# Usage: scan.sh <interface> <strategy> <dwell_ms>
+
+# Use absolute path for device deployment
+. /usr/share/wiglewrt/lib/common.sh
+
+IFACE="$1"
+STRATEGY="${2:-fixed}"
+DWELL_MS="${3:-500}"
+
+# Validate
+if [ -z "$IFACE" ]; then
+    echo "Usage: $0 <interface> [strategy] [dwell_ms]"
+    echo "Strategies: fixed, adaptive, rapid, monitor"
+    exit 1
+fi
+
+# Export dwell for strategies
+export DWELL_MS
+
+# Load strategy
+STRATEGY_FILE="/usr/share/wiglewrt/lib/strategies/${STRATEGY}.sh"
+if [ ! -f "$STRATEGY_FILE" ]; then
+    log error "Unknown strategy: $STRATEGY"
+    exit 1
+fi
+. "$STRATEGY_FILE"
+
+PARSE_AWK="/usr/share/wiglewrt/lib/parse_scan.awk"
+
+# Session counters (in memory)
+UNIQUE_COUNT=0
+TOTAL_SIGHTINGS=0
+SIGHTING_COUNT=0
+SEEN_BSSIDS_FILE="$WIGLEWRT_TMP/seen_bssids.txt"
+
+log info "Starting scanner on $IFACE with strategy $(strategy_name)"
+
+# Setup interface
+setup_interface() {
+    ip link set "$IFACE" down 2>/dev/null
+    iw dev "$IFACE" set type managed 2>/dev/null
+    ip link set "$IFACE" up 2>/dev/null
+    log info "Interface $IFACE ready"
+}
+
+# Initialize session state from existing file (if any)
+init_session_state() {
+    # Initialize seen BSSIDs file if not exists
+    [ ! -f "$SEEN_BSSIDS_FILE" ] && touch "$SEEN_BSSIDS_FILE"
+
+    # Read current counts from session state if exists
+    if [ -f "$SESSION_STATE" ]; then
+        UNIQUE_COUNT=$(grep -o '"unique_networks":[0-9]*' "$SESSION_STATE" 2>/dev/null | cut -d: -f2)
+        TOTAL_SIGHTINGS=$(grep -o '"total_sightings":[0-9]*' "$SESSION_STATE" 2>/dev/null | cut -d: -f2)
+        UNIQUE_COUNT=${UNIQUE_COUNT:-0}
+        TOTAL_SIGHTINGS=${TOTAL_SIGHTINGS:-0}
+        log info "Loaded session state: $UNIQUE_COUNT unique, $TOTAL_SIGHTINGS sightings"
+    fi
+}
+
+# Write session state JSON
+write_session_state() {
+    echo "{\"unique_networks\":$UNIQUE_COUNT,\"total_sightings\":$TOTAL_SIGHTINGS}" > "$SESSION_STATE"
+}
+
+# Log a network sighting to session CSV
+log_sighting() {
+    local bssid="$1" ssid="$2" channel="$3" signal="$4" enc="$5"
+    local lat="$6" lon="$7" alt="$8"
+    local ts=$(date "+%Y-%m-%d %H:%M:%S")
+
+    # Format encryption for WiGLE
+    local auth_mode="[${enc:-Open}]"
+
+    # Escape SSID commas for CSV
+    local safe_ssid=$(echo "$ssid" | sed 's/,/\\,/g')
+
+    # Append to CSV (persistent) - WiGLE format
+    echo "$bssid,$safe_ssid,$auth_mode,$ts,$channel,$signal,${lat:-0},${lon:-0},${alt:-0},0,WIFI" >> "$CURRENT_SESSION"
+
+    # Track source for UI display (separate from WiGLE CSV)
+    echo "$bssid|$ts|control" >> "$WIGLEWRT_TMP/source_tracking.txt"
+
+    # Update counts
+    TOTAL_SIGHTINGS=$((TOTAL_SIGHTINGS + 1))
+
+    # Check if BSSID already seen (using file for persistence across restarts)
+    if ! grep -q "^$bssid$" "$SEEN_BSSIDS_FILE" 2>/dev/null; then
+        echo "$bssid" >> "$SEEN_BSSIDS_FILE"
+        UNIQUE_COUNT=$((UNIQUE_COUNT + 1))
+        log info "NEW: $ssid ($bssid) ch$channel ${signal}dBm [$UNIQUE_COUNT unique]"
+    fi
+
+    # Sync to disk every 10 sightings for power-loss protection
+    SIGHTING_COUNT=$((SIGHTING_COUNT + 1))
+    if [ $((SIGHTING_COUNT % 10)) -eq 0 ]; then
+        sync
+        write_session_state
+        log debug "Synced: $UNIQUE_COUNT unique, $TOTAL_SIGHTINGS sightings"
+    fi
+}
+
+# Scan loop - runs forever
+scan_loop() {
+    local cycle=0
+    local scan_output="$WIGLEWRT_TMP/scan_${IFACE}.tmp"
+
+    init_session_state
+
+    while true; do
+        cycle=$((cycle + 1))
+
+        # Read GPS (non-blocking from file)
+        local gps_data=$(cat "$GPS_FILE" 2>/dev/null)
+        local lat="" lon="" alt=""
+        if [ -n "$gps_data" ]; then
+            lat=$(echo "$gps_data" | cut -f1)
+            lon=$(echo "$gps_data" | cut -f2)
+            alt=$(echo "$gps_data" | cut -f3)
+        fi
+
+        # Run scan cycle to temp file (avoids subshell variable loss)
+        strategy_scan_cycle "$IFACE" "$PARSE_AWK" > "$scan_output" 2>/dev/null
+
+        # Process each network from temp file
+        while IFS='	' read -r bssid ssid channel signal enc; do
+            [ -z "$bssid" ] && continue
+            log_sighting "$bssid" "$ssid" "$channel" "$signal" "$enc" "$lat" "$lon" "$alt"
+        done < "$scan_output"
+
+        log debug "Cycle $cycle complete on $IFACE"
+    done
+}
+
+# Main
+case "${4:-run}" in
+    run)
+        setup_interface
+        scan_loop
+        ;;
+    setup)
+        setup_interface
+        ;;
+    test)
+        setup_interface
+        init_session_state
+        log info "Running single scan cycle..."
+        strategy_scan_cycle "$IFACE" "$PARSE_AWK"
+        ;;
+    *)
+        echo "Usage: $0 <interface> <strategy> <dwell_ms> [run|setup|test]"
+        exit 1
+        ;;
+esac

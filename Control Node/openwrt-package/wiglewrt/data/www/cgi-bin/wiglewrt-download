@@ -1,0 +1,55 @@
+#!/bin/sh
+# CGI script to serve WigleWRT export files
+
+EXPORT_DIR="/tmp/wiglewrt_exports"
+
+# Parse query string to get filename
+filename=$(echo "$QUERY_STRING" | sed -n 's/.*file=\([^&]*\).*/\1/p')
+
+# URL decode (handle %XX sequences)
+filename=$(printf '%b' "$(echo "$filename" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')")
+
+# Security: validate filename (alphanumeric, underscore, dash, dot only)
+case "$filename" in
+    "")
+        echo "Status: 400 Bad Request"
+        echo "Content-Type: text/plain"
+        echo ""
+        echo "No filename specified"
+        exit 1
+        ;;
+    *[!a-zA-Z0-9_.-]*)
+        echo "Status: 400 Bad Request"
+        echo "Content-Type: text/plain"
+        echo ""
+        echo "Invalid filename"
+        exit 1
+        ;;
+esac
+
+# Prevent path traversal
+case "$filename" in
+    *..*)
+        echo "Status: 400 Bad Request"
+        echo "Content-Type: text/plain"
+        echo ""
+        echo "Invalid filename"
+        exit 1
+        ;;
+esac
+
+filepath="$EXPORT_DIR/$filename"
+
+if [ ! -f "$filepath" ]; then
+    echo "Status: 404 Not Found"
+    echo "Content-Type: text/plain"
+    echo ""
+    echo "File not found: $filename"
+    exit 1
+fi
+
+# Serve the file
+echo "Content-Type: text/csv"
+echo "Content-Disposition: attachment; filename=\"$filename\""
+echo ""
+cat "$filepath"

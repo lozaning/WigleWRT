@@ -1,0 +1,179 @@
+#!/bin/sh
+# sensor-worker - Background processor for sensor data queue
+# Runs continuously, processing queued sensor data and writing to session CSV
+# Optimized for ndjson format (one JSON object per line) for fast parsing
+
+QUEUE_DIR="/tmp/wiglewrt/sensor_queue"
+SESSION_DIR="/etc/wiglewrt/sessions"
+CURRENT_SESSION="$SESSION_DIR/current.csv"
+SESSION_STATE="/tmp/wiglewrt/session_state.json"
+GPS_FILE="/tmp/wiglewrt/gps.current"
+SEEN_FILE="/tmp/wiglewrt/seen_bssids.txt"
+PID_FILE="/tmp/wiglewrt/sensor_worker.pid"
+LOG_FILE="/tmp/wiglewrt/sensor_worker.log"
+
+log() {
+    echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+# Fast JSON field extraction using sed (no jsonfilter needed)
+# Usage: json_field '{"key":"value"}' "key"
+json_field() {
+    echo "$1" | sed -n 's/.*"'"$2"'":"\([^"]*\)".*/\1/p'
+}
+
+# Process a single queue file (ndjson format)
+# Format: First line is NODE:nodeid, subsequent lines are JSON objects
+process_queue_file() {
+    local qfile="$1"
+
+    [ ! -s "$qfile" ] && return
+
+    # Read current GPS
+    local gps_data=$(cat "$GPS_FILE" 2>/dev/null)
+    local lat=$(echo "$gps_data" | cut -f1)
+    local lon=$(echo "$gps_data" | cut -f2)
+    local alt=$(echo "$gps_data" | cut -f3)
+
+    [ -z "$lat" ] && lat="0"
+    [ -z "$lon" ] && lon="0"
+    [ -z "$alt" ] && alt="0"
+
+    local ts=$(date "+%Y-%m-%d %H:%M:%S")
+    local received=0
+    local new_unique=0
+    local node_id="sensor"
+
+    # Process line by line - fast awk-based parsing
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip empty lines
+        [ -z "$line" ] && continue
+
+        # Check for node header
+        case "$line" in
+            NODE:*)
+                node_id="${line#NODE:}"
+                continue
+                ;;
+        esac
+
+        # Parse JSON object using sed (much faster than jsonfilter)
+        local bssid=$(json_field "$line" "bssid")
+        [ -z "$bssid" ] && continue
+
+        local ssid=$(json_field "$line" "ssid")
+        local channel=$(json_field "$line" "channel")
+        local signal=$(json_field "$line" "signal")
+        local enc=$(json_field "$line" "encryption")
+
+        # Defaults
+        [ -z "$ssid" ] && ssid=""
+        [ -z "$channel" ] && channel="0"
+        [ -z "$signal" ] && signal="-100"
+        [ -z "$enc" ] && enc="Open"
+
+        # Format for WiGLE CSV
+        local auth="[$enc]"
+        local safe_ssid=$(echo "$ssid" | sed 's/"/""/g')
+        echo "$safe_ssid" | grep -q '[,"]' && safe_ssid="\"$safe_ssid\""
+
+        # Append to CSV
+        echo "$bssid,$safe_ssid,$auth,$ts,$channel,$signal,$lat,$lon,$alt,0,WIFI" >> "$CURRENT_SESSION"
+
+        # Track source for UI display (separate from WiGLE CSV)
+        echo "$bssid|$ts|$node_id" >> "/tmp/wiglewrt/source_tracking.txt"
+
+        received=$((received + 1))
+
+        # Track unique
+        if ! grep -qF "$bssid" "$SEEN_FILE" 2>/dev/null; then
+            echo "$bssid" >> "$SEEN_FILE"
+            new_unique=$((new_unique + 1))
+        fi
+    done < "$qfile"
+
+    # Update session state
+    if [ $received -gt 0 ]; then
+        local curr_unique=$(sed -n 's/.*"unique_networks":\([0-9]*\).*/\1/p' "$SESSION_STATE" 2>/dev/null)
+        local curr_sightings=$(sed -n 's/.*"total_sightings":\([0-9]*\).*/\1/p' "$SESSION_STATE" 2>/dev/null)
+        [ -z "$curr_unique" ] && curr_unique=0
+        [ -z "$curr_sightings" ] && curr_sightings=0
+
+        local new_total_unique=$((curr_unique + new_unique))
+        local new_total_sightings=$((curr_sightings + received))
+
+        echo "{\"unique_networks\":$new_total_unique,\"total_sightings\":$new_total_sightings}" > "${SESSION_STATE}.tmp"
+        mv "${SESSION_STATE}.tmp" "$SESSION_STATE"
+
+        log "Processed $received networks from $node_id ($new_unique new), GPS: $lat,$lon"
+    fi
+
+    # Remove processed file
+    rm -f "$qfile"
+}
+
+# Main loop
+main() {
+    log "Sensor worker starting"
+
+    mkdir -p "$QUEUE_DIR" "$SESSION_DIR"
+    touch "$SEEN_FILE"
+
+    # Ensure session CSV exists with header
+    if [ ! -f "$CURRENT_SESSION" ]; then
+        cat > "$CURRENT_SESSION" << 'EOF'
+WigleWifi-1.4,appRelease=2.0,model=OpenWRT,release=v2,device=WigleWRT,display=LuCI,board=Router,brand=WigleWRT
+MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type
+EOF
+    fi
+
+    while true; do
+        # Process all queued files (oldest first)
+        for qfile in $(ls -tr "$QUEUE_DIR"/*.json 2>/dev/null); do
+            [ -f "$qfile" ] && process_queue_file "$qfile"
+        done
+
+        # Small sleep to prevent busy-waiting
+        sleep 0.5 2>/dev/null || sleep 1
+    done
+}
+
+# Handle signals
+cleanup() {
+    log "Sensor worker stopping"
+    rm -f "$PID_FILE"
+    exit 0
+}
+
+trap cleanup INT TERM
+
+case "$1" in
+    start)
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "Sensor worker already running"
+            exit 1
+        fi
+        main &
+        echo $! > "$PID_FILE"
+        echo "Sensor worker started"
+        ;;
+    stop)
+        if [ -f "$PID_FILE" ]; then
+            kill "$(cat "$PID_FILE")" 2>/dev/null
+            rm -f "$PID_FILE"
+            echo "Sensor worker stopped"
+        fi
+        ;;
+    status)
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "Sensor worker running (PID $(cat "$PID_FILE"))"
+            echo "Queue files: $(ls "$QUEUE_DIR"/*.json 2>/dev/null | wc -l)"
+        else
+            echo "Sensor worker not running"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac

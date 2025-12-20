@@ -1,0 +1,285 @@
+#!/bin/sh
+# WigleWRT Export Utility - Exports network data to WiGLE CSV format
+
+# Read version from VERSION file (deployed to /usr/share/wiglewrt/VERSION or local)
+VERSION=$(cat /usr/share/wiglewrt/VERSION 2>/dev/null || cat "$(dirname "$0")/VERSION" 2>/dev/null || echo "2.1.0")
+
+DATA_DIR="/etc/wiglewrt"
+NETWORKS_FILE="$DATA_DIR/networks.tsv"
+SESSIONS_DIR="$DATA_DIR/sessions"
+EXPORT_DIR="$DATA_DIR/exports"
+
+# Ensure export directory exists
+mkdir -p "$EXPORT_DIR"
+
+# WiGLE CSV header
+wigle_header() {
+    echo "WigleWifi-1.4,appRelease=WigleWRT,model=OnHub,release=$VERSION,device=OpenWRT,display=none,board=ipq806x,brand=Google"
+    echo "MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type"
+}
+
+# Convert encryption format to WiGLE format
+convert_encryption() {
+    local enc=$1
+    case "$enc" in
+        *WPA2*WPA*|*WPA*WPA2*) echo "[WPA-PSK-CCMP+TKIP][WPA2-PSK-CCMP+TKIP]" ;;
+        *WPA2*) echo "[WPA2-PSK-CCMP]" ;;
+        *WPA*) echo "[WPA-PSK-TKIP]" ;;
+        *WEP*) echo "[WEP]" ;;
+        *Open*|"") echo "[OPEN]" ;;
+        *) echo "[$enc]" ;;
+    esac
+}
+
+# Export all networks
+export_all() {
+    local output_file="$EXPORT_DIR/wiglewrt_all_$(date '+%Y%m%d_%H%M%S').csv"
+
+    # Set umask so file is world-readable (for web server access)
+    umask 022
+    wigle_header > "$output_file"
+
+    # Skip header line and export each network
+    # Format: bssid ssid channel signal encryption first_seen last_seen times_seen lat lon alt acc
+    tail -n +2 "$NETWORKS_FILE" 2>/dev/null | while IFS='	' read -r bssid ssid channel signal encryption first_seen last_seen times_seen lat lon alt acc; do
+        if [ -n "$bssid" ]; then
+            # Convert encryption to WiGLE format
+            auth=$(convert_encryption "$encryption")
+
+            # SSID needs to be escaped for CSV (double quotes)
+            ssid_escaped=$(echo "$ssid" | sed 's/"/""/g')
+
+            # Use GPS coordinates if available, otherwise 0
+            lat=${lat:-0.000000}
+            lon=${lon:-0.000000}
+            alt=${alt:-0}
+            acc=${acc:-0}
+
+            # Output CSV line with GPS data
+            echo "$bssid,\"$ssid_escaped\",$auth,$first_seen,$channel,$signal,$lat,$lon,$alt,$acc,WIFI"
+        fi
+    done >> "$output_file"
+
+    echo "Exported to: $output_file"
+    echo "$output_file"
+}
+
+# Export networks from a specific session using session log
+export_session() {
+    local session_id=$1
+    local meta_file="$SESSIONS_DIR/$session_id.meta"
+    local log_file="$SESSIONS_DIR/$session_id.log"
+
+    if [ ! -f "$meta_file" ]; then
+        echo "Session not found: $session_id"
+        exit 1
+    fi
+
+    local output_file="$EXPORT_DIR/wiglewrt_${session_id}.csv"
+
+    # Set umask so file is world-readable (for web server access)
+    umask 022
+    wigle_header > "$output_file"
+
+    # If session log exists, use it for more accurate export with GPS
+    if [ -f "$log_file" ]; then
+        # Export from session log - has per-sighting GPS data
+        # Format: timestamp bssid ssid channel signal lat lon alt acc is_new
+        tail -n +2 "$log_file" 2>/dev/null | while IFS='	' read -r timestamp bssid ssid channel signal lat lon alt acc is_new; do
+            if [ -n "$bssid" ]; then
+                # For session export, only include new networks (first time seen)
+                if [ "$is_new" = "1" ]; then
+                    # Look up encryption from networks.tsv
+                    encryption=$(grep "^$bssid	" "$NETWORKS_FILE" 2>/dev/null | cut -f5)
+                    auth=$(convert_encryption "$encryption")
+                    ssid_escaped=$(echo "$ssid" | sed 's/"/""/g')
+
+                    # Use GPS coordinates if available
+                    lat=${lat:-0.000000}
+                    lon=${lon:-0.000000}
+                    alt=${alt:-0}
+                    acc=${acc:-0}
+
+                    echo "$bssid,\"$ssid_escaped\",$auth,$timestamp,$channel,$signal,$lat,$lon,$alt,$acc,WIFI"
+                fi
+            fi
+        done >> "$output_file"
+    else
+        # Fallback: Export based on time range from networks.tsv
+        local start_time=$(grep "start_time=" "$meta_file" | cut -d= -f2)
+        local end_time=$(grep "end_time=" "$meta_file" | cut -d= -f2)
+        [ -z "$end_time" ] && end_time=$(date '+%Y-%m-%d %H:%M:%S')
+
+        tail -n +2 "$NETWORKS_FILE" 2>/dev/null | while IFS='	' read -r bssid ssid channel signal encryption first_seen last_seen times_seen lat lon alt acc; do
+            if [ -n "$bssid" ]; then
+                if [ "$first_seen" \> "$start_time" ] || [ "$first_seen" = "$start_time" ]; then
+                    if [ "$first_seen" \< "$end_time" ] || [ "$first_seen" = "$end_time" ]; then
+                        auth=$(convert_encryption "$encryption")
+                        ssid_escaped=$(echo "$ssid" | sed 's/"/""/g')
+                        lat=${lat:-0.000000}
+                        lon=${lon:-0.000000}
+                        alt=${alt:-0}
+                        acc=${acc:-0}
+                        echo "$bssid,\"$ssid_escaped\",$auth,$first_seen,$channel,$signal,$lat,$lon,$alt,$acc,WIFI"
+                    fi
+                fi
+            fi
+        done >> "$output_file"
+    fi
+
+    echo "Exported session $session_id to: $output_file"
+    echo "$output_file"
+}
+
+# List available sessions
+list_sessions() {
+    echo "Available sessions:"
+    echo "==================="
+
+    for meta in $(ls -t "$SESSIONS_DIR"/*.meta 2>/dev/null); do
+        session=$(basename "$meta" .meta)
+        start=$(grep "start_time=" "$meta" | cut -d= -f2)
+        end=$(grep "end_time=" "$meta" | cut -d= -f2)
+        new=$(grep "new_networks=" "$meta" | cut -d= -f2)
+        total=$(grep "networks_at_end=" "$meta" | cut -d= -f2)
+        status=$(grep "status=" "$meta" | cut -d= -f2)
+
+        printf "%-20s | %s - %s | New: %4s | Total: %5s | %s\n" \
+            "$session" "$start" "${end:-running}" "${new:-?}" "${total:-?}" "$status"
+    done
+}
+
+# Get stats as JSON
+stats_json() {
+    local total_networks=$(tail -n +2 "$NETWORKS_FILE" 2>/dev/null | wc -l)
+    local is_running=0
+    local current_session=""
+
+    if [ -f /var/run/wiglewrt.pid ] && kill -0 "$(cat /var/run/wiglewrt.pid)" 2>/dev/null; then
+        is_running=1
+        # Find current session
+        for meta in $(ls -t "$SESSIONS_DIR"/*.meta 2>/dev/null); do
+            if grep -q "status=running" "$meta" 2>/dev/null; then
+                current_session=$(basename "$meta" .meta)
+                break
+            fi
+        done
+    fi
+
+    echo "{"
+    echo "  \"running\": $is_running,"
+    echo "  \"current_session\": \"$current_session\","
+    echo "  \"total_networks\": $total_networks"
+    echo "}"
+}
+
+# Get networks as JSON (for API)
+networks_json() {
+    local limit=${1:-100}
+    local offset=${2:-0}
+
+    echo "["
+
+    # Get networks, sorted by last_seen descending
+    tail -n +2 "$NETWORKS_FILE" 2>/dev/null | sort -t'	' -k7 -r | \
+        tail -n "+$((offset + 1))" | head -n "$limit" | \
+        awk -F'\t' '
+        BEGIN { first = 1 }
+        {
+            if (!first) printf ","
+            first = 0
+            gsub(/"/, "\\\"", $2)
+            printf "\n  {\"bssid\":\"%s\",\"ssid\":\"%s\",\"channel\":\"%s\",\"signal\":\"%s\",\"encryption\":\"%s\",\"first_seen\":\"%s\",\"last_seen\":\"%s\",\"times_seen\":%s}", \
+                $1, $2, $3, $4, $5, $6, $7, $8
+        }
+        END { printf "\n" }
+        '
+
+    echo "]"
+}
+
+# Get sessions as JSON
+sessions_json() {
+    echo "["
+
+    first=1
+    for meta in $(ls -t "$SESSIONS_DIR"/*.meta 2>/dev/null); do
+        session=$(basename "$meta" .meta)
+        start=$(grep "start_time=" "$meta" | cut -d= -f2)
+        end=$(grep "end_time=" "$meta" | cut -d= -f2)
+        new=$(grep "new_networks=" "$meta" | cut -d= -f2)
+        total=$(grep "networks_at_end=" "$meta" | cut -d= -f2)
+        status=$(grep "status=" "$meta" | cut -d= -f2)
+
+        [ $first -eq 0 ] && echo ","
+        first=0
+
+        echo "  {"
+        echo "    \"session_id\": \"$session\","
+        echo "    \"start_time\": \"$start\","
+        echo "    \"end_time\": \"$end\","
+        echo "    \"new_networks\": ${new:-0},"
+        echo "    \"total_networks\": ${total:-0},"
+        echo "    \"status\": \"$status\""
+        printf "  }"
+    done
+
+    echo ""
+    echo "]"
+}
+
+# Usage
+usage() {
+    cat << EOF
+WigleWRT Export Utility
+
+Usage: $0 [command] [options]
+
+Commands:
+    all             Export all networks to WiGLE CSV
+    session <id>    Export networks from specific session
+    list            List all sessions
+    stats-json      Output stats as JSON
+    networks-json   Output networks as JSON (for API)
+    sessions-json   Output sessions as JSON (for API)
+    help            Show this help
+
+Output files are created in: $EXPORT_DIR
+EOF
+}
+
+case "$1" in
+    all)
+        export_all
+        ;;
+    session)
+        if [ -z "$2" ]; then
+            echo "Usage: $0 session <session_id>"
+            exit 1
+        fi
+        export_session "$2"
+        ;;
+    list)
+        list_sessions
+        ;;
+    stats-json)
+        stats_json
+        ;;
+    networks-json)
+        networks_json "${2:-100}" "${3:-0}"
+        ;;
+    sessions-json)
+        sessions_json
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    --version|-V)
+        echo "wiglewrt-export $VERSION"
+        exit 0
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

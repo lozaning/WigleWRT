@@ -1,0 +1,15 @@
+{
+    "luci-app-wiglewrt": {
+        "description": "WigleWRT WiFi Scanner",
+        "read": {
+            "ubus": {
+                "wiglewrt": ["status", "networks", "current_scan", "sessions_list", "session_export", "gps_status", "get_config"]
+            }
+        },
+        "write": {
+            "ubus": {
+                "wiglewrt": ["start", "stop", "export", "session_delete", "set_config"]
+            }
+        }
+    }
+}

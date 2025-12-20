@@ -1,0 +1,205 @@
+#!/bin/sh
+# wiglewrt-leds - Simplified LED control for WigleWRT v2
+# Controls the OnHub ring LEDs based on scanning/GPS status
+
+LED_BASE="/sys/class/leds"
+GPS_FILE="/tmp/wiglewrt/gps.current"
+NUM_LEDS=6
+
+# Set a single LED's RGB values
+set_led() {
+    local pos=$1 r=$2 g=$3 b=$4
+    echo "$r" > "$LED_BASE/red:status-$pos/brightness" 2>/dev/null
+    echo "$g" > "$LED_BASE/green:status-$pos/brightness" 2>/dev/null
+    echo "$b" > "$LED_BASE/blue:status-$pos/brightness" 2>/dev/null
+}
+
+# Set all LEDs to same color
+set_all() {
+    local r=$1 g=$2 b=$3
+    for i in 0 1 2 3 4 5; do
+        set_led $i $r $g $b
+    done
+}
+
+# Flash white briefly (called when scan cycle completes)
+flash_white() {
+    set_all 255 255 255
+    sleep 0.5
+    set_all 0 0 0
+}
+
+# Check if we have GPS fix
+# Reads entire file atomically to avoid race conditions with GPS daemon writes
+has_gps_fix() {
+    if [ -f "$GPS_FILE" ]; then
+        # Read entire file content first (atomic), then parse
+        local gps_line=$(cat "$GPS_FILE" 2>/dev/null)
+        if [ -n "$gps_line" ]; then
+            local lat=$(echo "$gps_line" | cut -f1)
+            # Valid if lat exists, isn't empty, and isn't zero
+            if [ -n "$lat" ] && [ "$lat" != "0" ] && [ "$lat" != "" ]; then
+                # Additional sanity check - should be a number with decimal
+                case "$lat" in
+                    *[0-9]*.*[0-9]*) return 0 ;;  # Looks like a coordinate
+                esac
+            fi
+        fi
+    fi
+    return 1
+}
+
+# Chase animation - one LED bright, others dim
+# Red = no GPS fix, Green = has GPS fix
+# Note: Simplified without pipe reading - BusyBox ash doesn't support decimal timeouts
+do_chase() {
+    local pos=0
+    local r g b
+
+    while true; do
+        # Check GPS status to set color
+        if has_gps_fix; then
+            r=0; g=255; b=0    # Green for GPS fix
+        else
+            r=255; g=0; b=0    # Red for no fix
+        fi
+
+        # Update LEDs - chase pattern with gradient
+        for i in 0 1 2 3 4 5; do
+            if [ $i -eq $pos ]; then
+                # Bright LED
+                set_led $i $r $g $b
+            elif [ $i -eq $(( (pos + 5) % 6 )) ]; then
+                # Trailing LED (dimmer)
+                set_led $i $((r/3)) $((g/3)) $((b/3))
+            elif [ $i -eq $(( (pos + 4) % 6 )) ]; then
+                # Second trailing LED (very dim)
+                set_led $i $((r/8)) $((g/8)) $((b/8))
+            else
+                # Off
+                set_led $i 0 0 0
+            fi
+        done
+
+        # Advance position
+        pos=$(( (pos + 1) % 6 ))
+
+        # Frame delay (~10 FPS)
+        sleep 0.1
+    done
+}
+
+# Test mode - demonstrate all patterns
+do_test() {
+    echo "Testing LEDs..."
+
+    # Red chase (no GPS)
+    echo "Red chase (no GPS)..."
+    for cycle in 1 2 3 4; do
+        for pos in 0 1 2 3 4 5; do
+            for i in 0 1 2 3 4 5; do
+                if [ $i -eq $pos ]; then
+                    set_led $i 255 0 0
+                else
+                    set_led $i 25 0 0
+                fi
+            done
+            sleep 0.1
+        done
+    done
+
+    # Green chase (GPS fix)
+    echo "Green chase (GPS fix)..."
+    for cycle in 1 2 3 4; do
+        for pos in 0 1 2 3 4 5; do
+            for i in 0 1 2 3 4 5; do
+                if [ $i -eq $pos ]; then
+                    set_led $i 0 255 0
+                else
+                    set_led $i 0 25 0
+                fi
+            done
+            sleep 0.1
+        done
+    done
+
+    # White flash
+    echo "White flash..."
+    flash_white
+
+    # All off
+    set_all 0 0 0
+    echo "Test complete"
+}
+
+# Usage
+usage() {
+    cat << EOF
+WigleWRT LED Controller
+
+Usage: $0 <command>
+
+Commands:
+    start       Start LED daemon (chase animation)
+    stop        Stop LED daemon and turn off LEDs
+    flash       Send flash command to running daemon
+    test        Run LED test pattern
+    off         Turn all LEDs off immediately
+
+LED Patterns:
+    Red chase   = Scanning, no GPS fix
+    Green chase = Scanning, GPS fix acquired
+    White flash = Scan cycle completed
+EOF
+}
+
+# Main
+case "$1" in
+    start)
+        # Create pipe directory
+        mkdir -p /tmp/wiglewrt
+
+        # Check if already running by PID file
+        if [ -f /tmp/wiglewrt/led.pid ]; then
+            local old_pid=$(cat /tmp/wiglewrt/led.pid 2>/dev/null)
+            if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+                echo "LED daemon already running (PID $old_pid)"
+                exit 0
+            fi
+            # Stale PID file, clean up
+            rm -f /tmp/wiglewrt/led.pid
+        fi
+
+        # Start chase animation
+        do_chase &
+        echo $! > /tmp/wiglewrt/led.pid
+        echo "LED daemon started"
+        ;;
+    stop)
+        # Kill daemon by PID file
+        if [ -f /tmp/wiglewrt/led.pid ]; then
+            kill $(cat /tmp/wiglewrt/led.pid) 2>/dev/null
+            rm -f /tmp/wiglewrt/led.pid
+        fi
+        set_all 0 0 0
+        echo "LED daemon stopped"
+        ;;
+    flash)
+        # Flash directly (pipe-based commands removed for BusyBox compatibility)
+        flash_white
+        ;;
+    test)
+        do_test
+        ;;
+    off)
+        set_all 0 0 0
+        ;;
+    daemon)
+        # Called internally to run as daemon
+        do_chase
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

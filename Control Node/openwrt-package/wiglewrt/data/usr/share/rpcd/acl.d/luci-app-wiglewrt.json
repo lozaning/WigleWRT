@@ -1,0 +1,17 @@
+{
+	"luci-app-wiglewrt": {
+		"description": "Grant access to WigleWRT WiFi scanner",
+		"read": {
+			"ubus": {
+				"wiglewrt": ["status", "networks", "sessions", "radios", "gps_status", "session_log", "version"]
+			},
+			"uci": ["wiglewrt"]
+		},
+		"write": {
+			"ubus": {
+				"wiglewrt": ["start", "stop", "export", "delete_sessions"]
+			},
+			"uci": ["wiglewrt"]
+		}
+	}
+}
